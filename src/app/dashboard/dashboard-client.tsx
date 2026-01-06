@@ -34,6 +34,8 @@ interface StravaLap {
   average_heartrate?: number;
   max_heartrate?: number;
   lap_index: number;
+  total_elevation_gain?: number;
+  split?: number; // index
 }
 
 interface StravaGear {
@@ -139,17 +141,40 @@ const RPE_LABELS: Record<number, { label: string; color: string }> = {
   10: { label: 'Maximum', color: 'text-red-500' },
 };
 
-// Detect running type based on workout_type and split variance
-const detectRunningType = (activity: StravaActivity): { type: string; detected: boolean } => {
+// Detect running type based on workout_type, laps, and split variance
+const detectRunningType = (activity: StravaActivity): { type: string; detected: boolean; hasStructure: boolean } => {
   // Check explicit workout types first
-  if (activity.workout_type === 1) return { type: 'Race', detected: false };
-  if (activity.workout_type === 2) return { type: 'Long Run', detected: false };
-  if (activity.workout_type === 3) return { type: 'Intervals', detected: false };
+  if (activity.workout_type === 1) return { type: 'Race', detected: false, hasStructure: false };
+  if (activity.workout_type === 2) return { type: 'Long Run', detected: false, hasStructure: false };
+  if (activity.workout_type === 3) return { type: 'Intervals / Structured', detected: false, hasStructure: true };
   
-  // Heuristic: Check pace variance in splits
+  // Check if laps exist and have significant pace variance (manual lap presses = structured workout)
+  if (activity.laps && activity.laps.length >= 2) {
+    const lapPaces = activity.laps
+      .filter(lap => lap.distance > 100) // Only consider substantial laps
+      .map(lap => lap.average_speed > 0 ? 1000 / lap.average_speed : 0);
+    
+    if (lapPaces.length >= 2) {
+      const avgPace = lapPaces.reduce((a, b) => a + b, 0) / lapPaces.length;
+      const variance = lapPaces.reduce((sum, p) => sum + Math.pow(p - avgPace, 2), 0) / lapPaces.length;
+      const stdDev = Math.sqrt(variance);
+      
+      // If std deviation > 20 seconds in laps, it's a structured workout
+      if (stdDev > 20) {
+        return { type: 'Intervals / Structured', detected: true, hasStructure: true };
+      }
+    }
+    
+    // Multiple laps with similar paces = tempo or threshold
+    if (activity.laps.length >= 3) {
+      return { type: 'Structured Session', detected: true, hasStructure: true };
+    }
+  }
+  
+  // Fallback: Check pace variance in splits_metric
   if (activity.splits_metric && activity.splits_metric.length >= 3) {
     const paces = activity.splits_metric
-      .filter((s: any) => s.distance > 500) // Only consider substantial splits
+      .filter((s: any) => s.distance > 500)
       .map((s: any) => s.average_speed > 0 ? 1000 / s.average_speed : 0);
     
     if (paces.length >= 3) {
@@ -157,19 +182,18 @@ const detectRunningType = (activity: StravaActivity): { type: string; detected: 
       const variance = paces.reduce((sum: number, p: number) => sum + Math.pow(p - avgPace, 2), 0) / paces.length;
       const stdDev = Math.sqrt(variance);
       
-      // If std deviation > 30 seconds, likely intervals/fartlek
       if (stdDev > 30) {
-        return { type: 'Fartlek/Intervals', detected: true };
+        return { type: 'Fartlek/Variable', detected: true, hasStructure: false };
       }
     }
   }
   
   // Check if it's a recovery run (very slow pace, low HR)
   if (activity.average_heartrate && activity.average_heartrate < 140) {
-    return { type: 'Recovery Run', detected: true };
+    return { type: 'Recovery Run', detected: true, hasStructure: false };
   }
   
-  return { type: 'Steady Run', detected: true };
+  return { type: 'Steady Run', detected: true, hasStructure: false };
 };
 
 // Calculate Aerobic Decoupling (Cardiac Drift)
@@ -384,19 +408,68 @@ const generateHistoryTable = (history: StravaActivity[]): string => {
   return table;
 };
 
-// Format laps for interval workouts
-const formatLaps = (laps: StravaLap[]): string => {
+// Guess lap type based on pace and HR patterns
+const guessLapType = (lap: StravaLap, avgSessionPace: number): string => {
+  const lapPaceSeconds = lap.average_speed > 0 ? 1000 / lap.average_speed : 0;
+  const paceRatio = lapPaceSeconds / avgSessionPace;
+  
+  // Check lap name first (Strava sometimes labels them)
+  if (lap.name) {
+    const nameLower = lap.name.toLowerCase();
+    if (nameLower.includes('warm') || nameLower.includes('wu')) return '🔥 Warmup';
+    if (nameLower.includes('cool') || nameLower.includes('cd')) return '❄️ Cooldown';
+    if (nameLower.includes('rest') || nameLower.includes('recovery')) return '😮‍💨 Recovery';
+    if (nameLower.includes('interval') || nameLower.includes('rep')) return '⚡ Interval';
+  }
+  
+  // Heuristic based on pace relative to session average
+  if (paceRatio > 1.15) return '😮‍💨 Recovery';
+  if (paceRatio < 0.92) return '⚡ Hard';
+  return ''; // Normal pace, no label
+};
+
+// Format laps for structured workouts (manual lap button presses)
+const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number): string => {
   if (!laps || laps.length === 0) return "";
   
-  let text = "\n[INTERVAL STRUCTURE (Laps)]\n";
+  // Calculate session average pace in seconds/km
+  const avgSessionPace = sessionAvgSpeed > 0 ? 1000 / sessionAvgSpeed : 0;
+  
+  let text = "\n[WORKOUT STRUCTURE (Manual Laps)]\n";
+  text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
+  
   laps.forEach((lap, index) => {
     const lapPace = formatPace(lap.average_speed);
     const lapTime = formatDuration(lap.elapsed_time);
     const lapDist = (lap.distance / 1000).toFixed(2);
+    const lapType = guessLapType(lap, avgSessionPace);
+    
     const hrInfo = lap.average_heartrate 
-      ? `Avg HR: ${Math.round(lap.average_heartrate)} | Max HR: ${Math.round(lap.max_heartrate || 0)}`
+      ? `HR: ${Math.round(lap.average_heartrate)} | Max: ${Math.round(lap.max_heartrate || 0)}`
+      : "HR: -";
+    
+    const elevInfo = lap.total_elevation_gain && lap.total_elevation_gain > 5 
+      ? ` | +${Math.round(lap.total_elevation_gain)}m` 
       : "";
-    text += `Lap ${index + 1}: ${lapTime} | ${lapDist}km | ${lapPace}/km | ${hrInfo}\n`;
+    
+    text += `Lap ${index + 1}: ${lapTime} | ${lapDist} km | ${lapPace}/km | ${hrInfo}${elevInfo}`;
+    if (lapType) text += ` ${lapType}`;
+    text += "\n";
+  });
+  
+  return text;
+};
+
+// Format splits for steady/unstructured runs
+const formatSplits = (splits: any[]): string => {
+  if (!splits || splits.length === 0) return "";
+  
+  let text = "\n[KM SPLITS (Auto)]\n";
+  splits.forEach((split: any, index: number) => {
+    if (split.distance < 100) return;
+    const splitPace = formatPace(split.average_speed);
+    const splitHr = split.average_heartrate ? `HR: ${Math.round(split.average_heartrate)}` : "";
+    text += `Km ${index + 1}: ${formatDuration(split.elapsed_time)} | ${splitPace} | ${splitHr}\n`;
   });
   return text;
 };
@@ -435,38 +508,28 @@ const generateSessionData = (
   // Detect running type with smart heuristics
   const runType = detectRunningType(currentRun);
   
-  // Calculate decoupling
+  // Calculate decoupling (use splits for this calculation)
   const decoupling = calculateDecoupling(currentRun.splits_metric || []);
 
   // RPE info
   const rpeLabel = RPE_LABELS[rpe]?.label || 'Moderate';
 
-  // Generate splits or laps based on workout type
+  // Generate structure text: PRIORITIZE LAPS (manual) over SPLITS (auto)
   let structureText = "";
-  if (runType.type === 'Intervals' || runType.type === 'Fartlek/Intervals') {
-    // Use laps for intervals if available, otherwise fall back to splits
-    if (currentRun.laps && currentRun.laps.length > 1) {
-      structureText = formatLaps(currentRun.laps);
-    } else if (currentRun.splits_metric && currentRun.splits_metric.length > 0) {
-      structureText = "\n[KM SPLITS]\n";
-      currentRun.splits_metric.forEach((split: any, index: number) => {
-        if (split.distance < 100) return;
-        const splitPace = formatPace(split.average_speed);
-        const splitHr = split.average_heartrate ? `HR: ${Math.round(split.average_heartrate)}` : "";
-        structureText += `Km ${index + 1}: ${formatDuration(split.elapsed_time)} | ${splitPace} | ${splitHr}\n`;
-      });
+  const hasLaps = currentRun.laps && currentRun.laps.length > 0;
+  const hasSplits = currentRun.splits_metric && currentRun.splits_metric.length > 0;
+
+  if (hasLaps) {
+    // Use manual laps - these represent the actual workout structure
+    structureText = formatLaps(currentRun.laps!, currentRun.average_speed);
+    
+    // Also include auto splits as secondary data if it's a long structured workout
+    if (hasSplits && runType.hasStructure && currentRun.splits_metric!.length > 3) {
+      structureText += "\n" + formatSplits(currentRun.splits_metric!);
     }
-  } else {
-    // Standard splits for steady runs
-    if (currentRun.splits_metric && currentRun.splits_metric.length > 0) {
-      structureText = "\n[KM SPLITS]\n";
-      currentRun.splits_metric.forEach((split: any, index: number) => {
-        if (split.distance < 100) return;
-        const splitPace = formatPace(split.average_speed);
-        const splitHr = split.average_heartrate ? `HR: ${Math.round(split.average_heartrate)}` : "";
-        structureText += `Km ${index + 1}: ${formatDuration(split.elapsed_time)} | ${splitPace} | ${splitHr}\n`;
-      });
-    }
+  } else if (hasSplits) {
+    // Fallback to auto splits if no manual laps
+    structureText = formatSplits(currentRun.splits_metric!);
   }
 
   // Format zones
