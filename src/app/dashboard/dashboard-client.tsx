@@ -990,19 +990,19 @@ export default function DashboardClient({
           <CardContent className="grid grid-cols-2 md:grid-cols-4 gap-6">
             <div className="space-y-1 bg-slate-800/50 p-4 rounded-lg border border-slate-700/50">
               <div className="flex items-center gap-2 text-slate-400 text-sm"><Calendar className="w-4 h-4" /> Date</div>
-              <div className="font-semibold text-lg">{formattedDate}</div>
+              <div className="font-semibold text-lg text-white">{formattedDate}</div>
             </div>
             <div className="space-y-1 bg-slate-800/50 p-4 rounded-lg border border-slate-700/50">
               <div className="flex items-center gap-2 text-slate-400 text-sm"><MapPin className="w-4 h-4" /> Distance</div>
-              <div className="font-semibold text-lg">{(currentRun.distance / 1000).toFixed(2)} km</div>
+              <div className="font-semibold text-lg text-white">{(currentRun.distance / 1000).toFixed(2)} km</div>
             </div>
             <div className="space-y-1 bg-slate-800/50 p-4 rounded-lg border border-slate-700/50">
               <div className="flex items-center gap-2 text-slate-400 text-sm"><Timer className="w-4 h-4" /> Pace</div>
-              <div className="font-semibold text-lg">{formattedPace}</div>
+              <div className="font-semibold text-lg text-white">{formattedPace}</div>
             </div>
             <div className="space-y-1 bg-slate-800/50 p-4 rounded-lg border border-slate-700/50">
               <div className="flex items-center gap-2 text-slate-400 text-sm"><Clock className="w-4 h-4" /> Duration</div>
-              <div className="font-semibold text-lg">{formattedTime}</div>
+              <div className="font-semibold text-lg text-white">{formattedTime}</div>
             </div>
           </CardContent>
         </Card>
