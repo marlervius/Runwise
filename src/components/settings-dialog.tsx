@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Settings, Save } from "lucide-react";
+import { Settings, Save, AlertCircle, Sparkles } from "lucide-react";
 
 export interface UserProfile {
   maxHR: number;
@@ -25,14 +25,24 @@ export interface UserProfile {
 }
 
 export const DEFAULT_PROFILE: UserProfile = {
-  maxHR: 195,
-  restingHR: 50,
-  lactateThreshold: "172 bpm (4:15/km)",
-  goal: "Sub 3:30 Marathon",
-  injuryHistory: "None",
+  maxHR: 0,
+  restingHR: 0,
+  lactateThreshold: "",
+  goal: "",
+  injuryHistory: "",
 };
 
 const STORAGE_KEY = "runprompt-user-profile";
+
+export function hasStoredProfile(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    return stored !== null;
+  } catch {
+    return false;
+  }
+}
 
 export function loadProfileFromStorage(): UserProfile {
   if (typeof window === "undefined") return DEFAULT_PROFILE;
@@ -59,11 +69,24 @@ export function saveProfileToStorage(profile: UserProfile): void {
 interface SettingsDialogProps {
   profile: UserProfile;
   onSave: (profile: UserProfile) => void;
+  isOpen?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  isFirstTimeUser?: boolean;
 }
 
-export function SettingsDialog({ profile, onSave }: SettingsDialogProps) {
-  const [open, setOpen] = useState(false);
+export function SettingsDialog({ 
+  profile, 
+  onSave, 
+  isOpen, 
+  onOpenChange,
+  isFirstTimeUser = false 
+}: SettingsDialogProps) {
+  const [internalOpen, setInternalOpen] = useState(false);
   const [formData, setFormData] = useState<UserProfile>(profile);
+
+  // Use external control if provided, otherwise internal
+  const open = isOpen !== undefined ? isOpen : internalOpen;
+  const setOpen = onOpenChange || setInternalOpen;
 
   useEffect(() => {
     setFormData(profile);
@@ -75,6 +98,9 @@ export function SettingsDialog({ profile, onSave }: SettingsDialogProps) {
     setOpen(false);
   };
 
+  // Check if profile is incomplete
+  const isIncomplete = formData.maxHR === 0 || !formData.goal;
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -84,31 +110,54 @@ export function SettingsDialog({ profile, onSave }: SettingsDialogProps) {
       </DialogTrigger>
       <DialogContent className="bg-slate-900 border-slate-700 text-white sm:max-w-[500px]">
         <DialogHeader>
-          <DialogTitle className="text-xl">Runner Profile Settings</DialogTitle>
+          <DialogTitle className="text-xl flex items-center gap-2">
+            {isFirstTimeUser && <Sparkles className="w-5 h-5 text-amber-400" />}
+            {isFirstTimeUser ? "Welcome to RunPrompt!" : "Runner Profile Settings"}
+          </DialogTitle>
           <DialogDescription className="text-slate-400">
-            Customize your profile for more personalized AI coaching feedback.
+            {isFirstTimeUser 
+              ? "Let's set up your profile for personalized AI coaching."
+              : "Customize your profile for more personalized AI coaching feedback."
+            }
           </DialogDescription>
         </DialogHeader>
+
+        {/* First-time user welcome banner */}
+        {isFirstTimeUser && (
+          <div className="flex items-start gap-3 p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+            <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-amber-200">
+              <p className="font-medium mb-1">To give you accurate coaching, the AI needs to know your physiology.</p>
+              <p className="text-amber-300/80">If you don't know a value (like Lactate Threshold), leave it empty or enter 0 – the AI will estimate it for you based on your data.</p>
+            </div>
+          </div>
+        )}
         
         <div className="grid gap-4 py-4">
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="maxHR" className="text-slate-300">Max Heart Rate (bpm)</Label>
+              <Label htmlFor="maxHR" className="text-slate-300">
+                Max Heart Rate (bpm)
+                <span className="text-red-400 ml-1">*</span>
+              </Label>
               <Input
                 id="maxHR"
                 type="number"
-                value={formData.maxHR}
+                value={formData.maxHR || ""}
                 onChange={(e) => setFormData({ ...formData, maxHR: parseInt(e.target.value) || 0 })}
+                placeholder="e.g., 185"
                 className="bg-slate-800 border-slate-600 text-white"
               />
+              <p className="text-xs text-slate-500">Enter 0 if unknown – AI will estimate</p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="restingHR" className="text-slate-300">Resting Heart Rate (bpm)</Label>
               <Input
                 id="restingHR"
                 type="number"
-                value={formData.restingHR}
+                value={formData.restingHR || ""}
                 onChange={(e) => setFormData({ ...formData, restingHR: parseInt(e.target.value) || 0 })}
+                placeholder="e.g., 55"
                 className="bg-slate-800 border-slate-600 text-white"
               />
             </div>
@@ -120,18 +169,24 @@ export function SettingsDialog({ profile, onSave }: SettingsDialogProps) {
               id="lactateThreshold"
               value={formData.lactateThreshold}
               onChange={(e) => setFormData({ ...formData, lactateThreshold: e.target.value })}
-              placeholder="e.g., 172 bpm (4:15/km)"
+              placeholder="e.g., 172 bpm (4:15/km) or leave empty"
               className="bg-slate-800 border-slate-600 text-white"
             />
+            <p className="text-xs text-slate-500">
+              💡 Leave empty if unknown. The AI will estimate it from your pace/HR data.
+            </p>
           </div>
           
           <div className="space-y-2">
-            <Label htmlFor="goal" className="text-slate-300">Running Goal</Label>
+            <Label htmlFor="goal" className="text-slate-300">
+              Running Goal
+              <span className="text-red-400 ml-1">*</span>
+            </Label>
             <Input
               id="goal"
               value={formData.goal}
               onChange={(e) => setFormData({ ...formData, goal: e.target.value })}
-              placeholder="e.g., Sub 3:30 Marathon"
+              placeholder="e.g., Sub 3:30 Marathon, Run 5K without stopping"
               className="bg-slate-800 border-slate-600 text-white"
             />
           </div>
@@ -142,17 +197,26 @@ export function SettingsDialog({ profile, onSave }: SettingsDialogProps) {
               id="injuryHistory"
               value={formData.injuryHistory}
               onChange={(e) => setFormData({ ...formData, injuryHistory: e.target.value })}
-              placeholder="e.g., Tendency for shin splints on high volume"
+              placeholder="e.g., Tendency for shin splints, recovering from IT band issues"
               className="bg-slate-800 border-slate-600 text-white resize-none"
               rows={3}
             />
           </div>
         </div>
         
-        <DialogFooter>
-          <Button onClick={handleSave} className="bg-purple-600 hover:bg-purple-700">
+        <DialogFooter className="flex-col sm:flex-row gap-2">
+          {isIncomplete && (
+            <p className="text-xs text-amber-400 mr-auto">
+              * Please fill in at least Max HR and Goal
+            </p>
+          )}
+          <Button 
+            onClick={handleSave} 
+            className="bg-purple-600 hover:bg-purple-700"
+            disabled={isFirstTimeUser && isIncomplete}
+          >
             <Save className="w-4 h-4 mr-2" />
-            Save Profile
+            {isFirstTimeUser ? "Get Started" : "Save Profile"}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -9,7 +9,8 @@ import {
   SettingsDialog, 
   UserProfile, 
   DEFAULT_PROFILE, 
-  loadProfileFromStorage 
+  loadProfileFromStorage,
+  hasStoredProfile
 } from "@/components/settings-dialog";
 import {
   ComposedChart,
@@ -613,11 +614,11 @@ COACHING PHILOSOPHY:
 MY ATHLETE PROFILE
 ═══════════════════════════════════════════════════════════════
 
-• Max Heart Rate: ${profile.maxHR} bpm
-• Resting Heart Rate: ${profile.restingHR} bpm
-• Lactate Threshold: ${profile.lactateThreshold}
-• Primary Goal: ${profile.goal}
-• Injury History: ${profile.injuryHistory}
+• Max Heart Rate: ${profile.maxHR && profile.maxHR > 0 ? `${profile.maxHR} bpm` : 'UNKNOWN - Please estimate based on highest observed HR in my data and age-based formulas'}
+• Resting Heart Rate: ${profile.restingHR && profile.restingHR > 0 ? `${profile.restingHR} bpm` : 'UNKNOWN'}
+• Lactate Threshold: ${profile.lactateThreshold && profile.lactateThreshold.trim() !== '' && profile.lactateThreshold !== '0' ? profile.lactateThreshold : 'UNKNOWN - Please estimate my Lactate Threshold (HR and Pace) based on my recent best efforts, cardiac drift patterns, and pace/HR relationship'}
+• Primary Goal: ${profile.goal || 'Not specified - ask me about my goals'}
+• Injury History: ${profile.injuryHistory || 'None specified'}
 
 ═══════════════════════════════════════════════════════════════
 INITIAL TRAINING DATA
@@ -708,6 +709,8 @@ export default function DashboardClient({
   const [isLoaded, setIsLoaded] = useState(false);
   const [promptMode, setPromptMode] = useState<PromptMode>('daily');
   const [rpe, setRpe] = useState(5); // Rate of Perceived Exertion (1-10)
+  const [isFirstTimeUser, setIsFirstTimeUser] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   // Filter valid runs first
   const validRuns = useMemo(() => filterValidRuns(activities), [activities]);
@@ -730,8 +733,18 @@ export default function DashboardClient({
 
   // Load profile from localStorage on mount
   useEffect(() => {
-    const storedProfile = loadProfileFromStorage();
-    setUserProfile(storedProfile);
+    const hasProfile = hasStoredProfile();
+    
+    if (!hasProfile) {
+      // First-time user - show onboarding
+      setIsFirstTimeUser(true);
+      setIsSettingsOpen(true);
+      setUserProfile(DEFAULT_PROFILE);
+    } else {
+      const storedProfile = loadProfileFromStorage();
+      setUserProfile(storedProfile);
+    }
+    
     setIsLoaded(true);
   }, []);
 
@@ -757,6 +770,7 @@ export default function DashboardClient({
 
   const handleProfileSave = (newProfile: UserProfile) => {
     setUserProfile(newProfile);
+    setIsFirstTimeUser(false); // User has now completed onboarding
   };
 
   // Calculate training load for display
@@ -811,7 +825,13 @@ export default function DashboardClient({
               )}
             </p>
           </div>
-          <SettingsDialog profile={userProfile} onSave={handleProfileSave} />
+          <SettingsDialog 
+            profile={userProfile} 
+            onSave={handleProfileSave}
+            isOpen={isSettingsOpen}
+            onOpenChange={setIsSettingsOpen}
+            isFirstTimeUser={isFirstTimeUser}
+          />
         </div>
 
         {/* Training Load Summary */}
