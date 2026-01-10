@@ -12,6 +12,7 @@ import {
   loadProfileFromStorage,
   hasStoredProfile
 } from "@/components/settings-dialog";
+import { ProTipsDialog } from "@/components/pro-tips-dialog";
 import {
   ComposedChart,
   Bar,
@@ -825,13 +826,16 @@ export default function DashboardClient({
               )}
             </p>
           </div>
-          <SettingsDialog 
-            profile={userProfile} 
-            onSave={handleProfileSave}
-            isOpen={isSettingsOpen}
-            onOpenChange={setIsSettingsOpen}
-            isFirstTimeUser={isFirstTimeUser}
-          />
+          <div className="flex items-center gap-2">
+            <ProTipsDialog />
+            <SettingsDialog 
+              profile={userProfile} 
+              onSave={handleProfileSave}
+              isOpen={isSettingsOpen}
+              onOpenChange={setIsSettingsOpen}
+              isFirstTimeUser={isFirstTimeUser}
+            />
+          </div>
         </div>
 
         {/* Training Load Summary */}
