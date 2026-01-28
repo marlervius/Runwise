@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Activity, Calendar, Clock, MapPin, Copy, Check, Timer, TrendingUp, BarChart3, Heart, Trophy, Zap, Sparkles, RefreshCw, Info, Gauge } from "lucide-react";
+import { Activity, Calendar, Clock, MapPin, Copy, Check, Timer, TrendingUp, BarChart3, Heart, Trophy, Zap, Sparkles, RefreshCw, Info, Gauge, History, ChevronLeft, ChevronRight } from "lucide-react";
 import { 
   SettingsDialog, 
   UserProfile, 
@@ -712,13 +712,17 @@ export default function DashboardClient({
   const [rpe, setRpe] = useState(5); // Rate of Perceived Exertion (1-10)
   const [isFirstTimeUser, setIsFirstTimeUser] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [selectedActivityIndex, setSelectedActivityIndex] = useState(0); // Which activity to analyze
 
   // Filter valid runs first
   const validRuns = useMemo(() => filterValidRuns(activities), [activities]);
   
-  // Split activities into current run and history
-  const currentRun = validRuns[0];
-  const history = validRuns.slice(1);
+  // Get selected activity and history (all other activities for context)
+  const currentRun = validRuns[selectedActivityIndex] || validRuns[0];
+  const history = useMemo(() => {
+    // History is all activities except the selected one, maintaining order
+    return validRuns.filter((_, index) => index !== selectedActivityIndex);
+  }, [validRuns, selectedActivityIndex]);
   
   // Prepare chart data
   const chartData = useMemo(() => prepareChartData(validRuns), [validRuns]);
@@ -817,12 +821,32 @@ export default function DashboardClient({
         <div className="flex items-center justify-between">
           <div className="space-y-2">
             <h1 className="text-4xl font-bold tracking-tight bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
-              Your Latest Run
+              {selectedActivityIndex === 0 ? 'Your Latest Run' : 'Activity History'}
             </h1>
             <p className="text-slate-400">
-              AI analysis with {validRuns.length} valid sessions 
-              {activities.length !== validRuns.length && (
-                <span className="text-slate-500"> ({activities.length - validRuns.length} filtered out)</span>
+              {selectedActivityIndex === 0 ? (
+                <>
+                  AI analysis with {validRuns.length} valid sessions 
+                  {activities.length !== validRuns.length && (
+                    <span className="text-slate-500"> ({activities.length - validRuns.length} filtered out)</span>
+                  )}
+                </>
+              ) : (
+                <>
+                  Viewing activity from{' '}
+                  <span className="text-indigo-400">
+                    {new Date(currentRun.start_date_local).toLocaleDateString('en-US', { 
+                      month: 'long', 
+                      day: 'numeric' 
+                    })}
+                  </span>
+                  {' '}• <button 
+                    onClick={() => setSelectedActivityIndex(0)} 
+                    className="text-purple-400 hover:text-purple-300 underline underline-offset-2"
+                  >
+                    Back to latest
+                  </button>
+                </>
               )}
             </p>
           </div>
@@ -837,6 +861,84 @@ export default function DashboardClient({
             />
           </div>
         </div>
+
+        {/* Activity History Selector */}
+        {validRuns.length > 1 && (
+          <Card className="bg-slate-900/50 border-slate-800 backdrop-blur-sm">
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-lg text-white">
+                <History className="w-5 h-5 text-indigo-400" />
+                Select Activity to Analyze
+                <span className="text-sm font-normal text-slate-400 ml-2">
+                  ({validRuns.length} available)
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="pb-4">
+              <div className="relative">
+                {/* Scroll hint gradients */}
+                <div className="absolute left-0 top-0 bottom-0 w-8 bg-gradient-to-r from-slate-900/80 to-transparent z-10 pointer-events-none" />
+                <div className="absolute right-0 top-0 bottom-0 w-8 bg-gradient-to-l from-slate-900/80 to-transparent z-10 pointer-events-none" />
+                
+                {/* Scrollable activity list */}
+                <div className="flex gap-3 overflow-x-auto pb-2 px-1 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+                  {validRuns.map((activity, index) => {
+                    const activityDate = new Date(activity.start_date_local);
+                    const isSelected = index === selectedActivityIndex;
+                    const distanceKm = (activity.distance / 1000).toFixed(1);
+                    const pace = formatPace(activity.average_speed);
+                    
+                    return (
+                      <button
+                        key={activity.start_date_local + index}
+                        onClick={() => setSelectedActivityIndex(index)}
+                        className={`flex-shrink-0 p-3 rounded-lg border transition-all duration-200 text-left min-w-[160px] ${
+                          isSelected
+                            ? 'bg-indigo-600/30 border-indigo-500 shadow-lg shadow-indigo-500/20'
+                            : 'bg-slate-800/50 border-slate-700/50 hover:bg-slate-800 hover:border-slate-600'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          {index === 0 && (
+                            <span className="text-[10px] bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded font-medium">
+                              LATEST
+                            </span>
+                          )}
+                          {activity.trainer && (
+                            <span className="text-[10px]">🏠</span>
+                          )}
+                        </div>
+                        <p className={`font-medium text-sm truncate ${isSelected ? 'text-white' : 'text-slate-300'}`}>
+                          {activity.name}
+                        </p>
+                        <p className="text-xs text-slate-400 mt-1">
+                          {activityDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                        </p>
+                        <div className="flex items-center gap-2 mt-2 text-xs">
+                          <span className={isSelected ? 'text-indigo-300' : 'text-slate-400'}>
+                            {distanceKm} km
+                          </span>
+                          <span className="text-slate-600">•</span>
+                          <span className={isSelected ? 'text-indigo-300' : 'text-slate-400'}>
+                            {pace}/km
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              
+              {/* Navigation hint */}
+              {selectedActivityIndex > 0 && (
+                <p className="text-xs text-amber-400/70 mt-3 flex items-center gap-1">
+                  <Info className="w-3 h-3" />
+                  Viewing older activity. Swipe/scroll to see more or select the latest.
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         {/* Training Load Summary */}
         <Card className="bg-gradient-to-r from-indigo-900/30 to-purple-900/30 border-indigo-800/50 backdrop-blur-sm">
