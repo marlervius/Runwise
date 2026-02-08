@@ -143,6 +143,25 @@ const RPE_LABELS: Record<number, { label: string; color: string }> = {
   10: { label: 'Maximum', color: 'text-red-500' },
 };
 
+// Classify activity type based on HR zones (Garmin-style)
+const classifyActivityType = (activity: StravaActivity, maxHR: number): string => {
+  // Explicit Strava workout types take priority
+  if (activity.workout_type === 1) return "Race";
+
+  // Need HR data and maxHR to classify
+  if (!activity.average_heartrate || !maxHR || maxHR === 0) {
+    return "Easy"; // fallback when no HR data available
+  }
+
+  const hrPercent = (activity.average_heartrate / maxHR) * 100;
+
+  if (hrPercent < 60) return "Recovery";
+  if (hrPercent < 70) return "Base";
+  if (hrPercent < 80) return "Tempo";
+  if (hrPercent < 90) return "Threshold";
+  return "VO2max";
+};
+
 // Detect running type based on workout_type, laps, and split variance
 const detectRunningType = (activity: StravaActivity): { type: string; detected: boolean; hasStructure: boolean } => {
   // Check explicit workout types first
@@ -388,25 +407,23 @@ const formatZonesForPrompt = (zones: HeartRateZoneBucket[]): string => {
 };
 
 // Generate history table
-const generateHistoryTable = (history: StravaActivity[]): string => {
+const generateHistoryTable = (history: StravaActivity[], maxHR: number): string => {
   if (history.length === 0) return "No previous activities available.";
-  
+
   let table = "| Date | Location | Type | Dist (km) | Pace | Avg HR |\n";
   table += "|------|----------|------|-----------|------|--------|\n";
-  
+
   history.forEach(activity => {
     const date = formatShortDate(activity.start_date_local);
     const location = activity.trainer ? "Treadmill" : "Outdoor";
-    const type = activity.workout_type === 1 ? "Race" : 
-                 activity.workout_type === 2 ? "Long" : 
-                 activity.workout_type === 3 ? "Workout" : "Easy";
+    const type = classifyActivityType(activity, maxHR);
     const dist = (activity.distance / 1000).toFixed(1);
     const pace = formatPace(activity.average_speed);
     const hr = activity.average_heartrate ? Math.round(activity.average_heartrate).toString() : "-";
-    
+
     table += `| ${date} | ${location} | ${type} | ${dist} | ${pace} | ${hr} |\n`;
   });
-  
+
   return table;
 };
 
@@ -482,7 +499,8 @@ const generateSessionData = (
   history: StravaActivity[],
   zones: HeartRateZoneBucket[],
   bestEfforts: BestEffort[],
-  rpe: number
+  rpe: number,
+  maxHR: number
 ): string => {
   const date = new Date(currentRun.start_date_local).toLocaleDateString('en-US');
   const distanceKm = (currentRun.distance / 1000).toFixed(2);
@@ -548,7 +566,7 @@ const generateSessionData = (
   const load = calculateTrainingLoad(allActivities);
   
   // Generate history table
-  const historyTable = generateHistoryTable(history);
+  const historyTable = generateHistoryTable(history, maxHR);
 
   const location = currentRun.trainer ? "Treadmill" : "Outdoor";
 
@@ -589,7 +607,7 @@ const generateSystemPrompt = (
   bestEfforts: BestEffort[],
   rpe: number
 ): string => {
-  const sessionData = generateSessionData(currentRun, history, zones, bestEfforts, rpe);
+  const sessionData = generateSessionData(currentRun, history, zones, bestEfforts, rpe, profile.maxHR || 0);
 
   return `
 ╔══════════════════════════════════════════════════════════════╗
@@ -649,9 +667,10 @@ const generateUpdatePrompt = (
   history: StravaActivity[],
   zones: HeartRateZoneBucket[],
   bestEfforts: BestEffort[],
-  rpe: number
+  rpe: number,
+  maxHR: number
 ): string => {
-  const sessionData = generateSessionData(currentRun, history, zones, bestEfforts, rpe);
+  const sessionData = generateSessionData(currentRun, history, zones, bestEfforts, rpe, maxHR);
   const allActivities = [currentRun, ...history];
   const load = calculateTrainingLoad(allActivities);
 
@@ -761,8 +780,8 @@ export default function DashboardClient({
 
   const updatePrompt = useMemo(() => {
     if (!currentRun) return "";
-    return generateUpdatePrompt(currentRun, history, heartRateZones, bestEfforts, rpe);
-  }, [currentRun, history, heartRateZones, bestEfforts, rpe]);
+    return generateUpdatePrompt(currentRun, history, heartRateZones, bestEfforts, rpe, userProfile.maxHR || 0);
+  }, [currentRun, history, heartRateZones, bestEfforts, rpe, userProfile.maxHR]);
 
   // Get the active prompt based on mode
   const activePrompt = promptMode === 'setup' ? systemPrompt : updatePrompt;
