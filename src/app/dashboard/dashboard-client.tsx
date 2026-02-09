@@ -430,12 +430,12 @@ const formatZonesForPrompt = (zones: HeartRateZoneBucket[]): string => {
   return text;
 };
 
-// Generate history table
+// Generate history table (includes athlete notes/descriptions when available)
 const generateHistoryTable = (history: StravaActivity[], maxHR: number): string => {
   if (history.length === 0) return "No previous activities available.";
 
-  let table = "| Date | Location | Type | Dist (km) | Pace | Avg HR |\n";
-  table += "|------|----------|------|-----------|------|--------|\n";
+  let table = "| Date | Location | Type | Dist (km) | Pace | Avg HR | Notes |\n";
+  table += "|------|----------|------|-----------|------|--------|-------|\n";
 
   history.forEach(activity => {
     const date = formatShortDate(activity.start_date_local);
@@ -444,8 +444,12 @@ const generateHistoryTable = (history: StravaActivity[], maxHR: number): string 
     const dist = (activity.distance / 1000).toFixed(1);
     const pace = formatPace(activity.average_speed);
     const hr = activity.average_heartrate ? Math.round(activity.average_heartrate).toString() : "-";
+    // Truncate description to keep table readable, strip newlines
+    const notes = activity.description && activity.description.trim().length > 0
+      ? activity.description.trim().replace(/[\n\r]+/g, ' ').substring(0, 60) + (activity.description.trim().length > 60 ? '...' : '')
+      : "-";
 
-    table += `| ${date} | ${location} | ${type} | ${dist} | ${pace} | ${hr} |\n`;
+    table += `| ${date} | ${location} | ${type} | ${dist} | ${pace} | ${hr} | ${notes} |\n`;
   });
 
   return table;
@@ -1041,12 +1045,17 @@ const generateSessionData = (
 
   const location = currentRun.trainer ? "Treadmill" : "Outdoor";
 
+  // User description from Strava (often contains manual interval notes, RPE, conditions)
+  const descriptionText = currentRun.description && currentRun.description.trim().length > 0
+    ? `\nATHLETE NOTES: "${currentRun.description.trim()}"\n`
+    : "";
+
   return `
 SESSION: "${currentRun.name}"
 Date: ${date} | Location: ${location}
 Intensity: ${zoneClassification.classification} (Zone-based)${zoneClassification.breakdown ? ` [${zoneClassification.breakdown}]` : ''}
 Structure: ${runType.type}${runType.detected ? ' (Auto-detected)' : ''}
-
+${descriptionText}
 ACTIVITY METRICS:
 • Distance: ${distanceKm} km
 • Duration: ${duration}
