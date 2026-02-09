@@ -162,6 +162,27 @@ const classifyActivityType = (activity: StravaActivity, maxHR: number): string =
   return "VO2max";
 };
 
+// Classify using HR zone TIME DISTRIBUTION (more accurate than avg HR)
+// This uses the actual time spent in each zone, avoiding the "easy run labeled Tempo" problem
+const classifyByZones = (zones: HeartRateZoneBucket[]): { classification: string; breakdown: string } => {
+  const totalTime = zones.reduce((sum, z) => sum + z.time, 0);
+  if (totalTime === 0) return { classification: "Unknown", breakdown: "" };
+  
+  const pct = zones.map(z => (z.time / totalTime) * 100);
+  const easyPct = (pct[0] || 0) + (pct[1] || 0);   // Z1 + Z2
+  const tempoPct = pct[2] || 0;                       // Z3
+  const hardPct = (pct[3] || 0) + (pct[4] || 0);     // Z4 + Z5
+
+  const breakdown = `Z1-2: ${easyPct.toFixed(0)}% | Z3: ${tempoPct.toFixed(0)}% | Z4-5: ${hardPct.toFixed(0)}%`;
+
+  if (easyPct >= 70) return { classification: "Easy / Base", breakdown };
+  if (easyPct >= 55 && hardPct < 10) return { classification: "Easy / Aerobic", breakdown };
+  if (hardPct >= 30) return { classification: "Threshold / Intervals", breakdown };
+  if (tempoPct >= 30) return { classification: "Tempo", breakdown };
+  if (easyPct >= 45 && tempoPct >= 20) return { classification: "Moderate / Steady State", breakdown };
+  return { classification: "Mixed Intensity", breakdown };
+};
+
 // Detect running type based on workout_type, laps, and split variance
 const detectRunningType = (activity: StravaActivity): { type: string; detected: boolean; hasStructure: boolean } => {
   // Check explicit workout types first
@@ -448,6 +469,7 @@ const guessLapType = (lap: StravaLap, avgSessionPace: number): string => {
 };
 
 // Format laps for structured workouts (manual lap button presses)
+// Enhanced: identifies rest laps, shows recovery HR, GAP estimates
 const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number): string => {
   if (!laps || laps.length === 0) return "";
   
@@ -457,11 +479,15 @@ const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number): string => {
   let text = "\n[WORKOUT STRUCTURE (Manual Laps)]\n";
   text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
   
+  let lastWorkLapMaxHR: number | null = null;
+  
   laps.forEach((lap, index) => {
     const lapPace = formatPace(lap.average_speed);
     const lapTime = formatDuration(lap.elapsed_time);
     const lapDist = (lap.distance / 1000).toFixed(2);
     const lapType = guessLapType(lap, avgSessionPace);
+    const isRestLap = lapType.includes('Recovery');
+    const isWarmCool = lapType.includes('Warmup') || lapType.includes('Cooldown');
     
     const hrInfo = lap.average_heartrate 
       ? `HR: ${Math.round(lap.average_heartrate)} | Max: ${Math.round(lap.max_heartrate || 0)}`
@@ -471,9 +497,48 @@ const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number): string => {
       ? ` | +${Math.round(lap.total_elevation_gain)}m` 
       : "";
     
-    text += `Lap ${index + 1}: ${lapTime} | ${lapDist} km | ${lapPace}/km | ${hrInfo}${elevInfo}`;
+    // GAP estimate for laps with notable elevation
+    let gapInfo = "";
+    if (lap.total_elevation_gain && lap.distance > 200) {
+      const gradePercent = (lap.total_elevation_gain / lap.distance) * 100;
+      if (gradePercent > 0.5 && lap.average_speed > 0) {
+        const actualPaceSeconds = 1000 / lap.average_speed;
+        const gapAdjustment = gradePercent * 12; // ~12 sec/km per 1% grade
+        const gapSeconds = actualPaceSeconds - gapAdjustment;
+        if (gapSeconds > 120 && gapSeconds < actualPaceSeconds) {
+          const gapMin = Math.floor(gapSeconds / 60);
+          const gapSec = Math.floor(gapSeconds % 60);
+          gapInfo = ` | GAP: ~${gapMin}:${gapSec.toString().padStart(2, '0')}/km`;
+        }
+      }
+    }
+    
+    // Recovery info for rest laps
+    let recoveryInfo = "";
+    if (isRestLap && lastWorkLapMaxHR && lap.average_heartrate) {
+      const hrDrop = lastWorkLapMaxHR - lap.average_heartrate;
+      if (hrDrop > 0) {
+        recoveryInfo = ` | Recovery: -${Math.round(hrDrop)} bpm from prev peak`;
+      }
+    }
+
+    // Standing rest detection (very little distance for elapsed time)
+    let restNote = "";
+    if (isRestLap && lap.elapsed_time > 0) {
+      const standingTime = lap.elapsed_time - lap.moving_time;
+      if (standingTime > 10) {
+        restNote = ` | Standing rest: ${formatDuration(standingTime)}`;
+      }
+    }
+    
+    text += `Lap ${index + 1}: ${lapTime} | ${lapDist} km | ${lapPace}/km | ${hrInfo}${elevInfo}${gapInfo}${recoveryInfo}${restNote}`;
     if (lapType) text += ` ${lapType}`;
     text += "\n";
+    
+    // Track work lap HR for recovery calculation
+    if (!isRestLap && !isWarmCool && lap.max_heartrate) {
+      lastWorkLapMaxHR = lap.max_heartrate;
+    }
   });
   
   return text;
@@ -493,6 +558,334 @@ const formatSplits = (splits: any[]): string => {
   return text;
 };
 
+// Calculate HR drift across work laps in structured workouts
+const calculateWorkLapHRDrift = (laps: StravaLap[], sessionAvgSpeed: number): string => {
+  if (!laps || laps.length < 3) return "";
+  
+  const avgSessionPace = sessionAvgSpeed > 0 ? 1000 / sessionAvgSpeed : 0;
+  
+  // Identify work laps (faster than ~95% of session avg pace, with HR data, substantial distance)
+  const workLaps = laps.filter(lap => {
+    if (!lap.average_heartrate || lap.average_heartrate === 0) return false;
+    if (lap.distance < 200) return false;
+    const lapPaceSeconds = lap.average_speed > 0 ? 1000 / lap.average_speed : 0;
+    const paceRatio = lapPaceSeconds / avgSessionPace;
+    return paceRatio < 0.95; // Faster than session average
+  });
+  
+  if (workLaps.length < 2) return "";
+  
+  let text = "\n[WORK LAP HR PROGRESSION]\n";
+  
+  workLaps.forEach((lap, index) => {
+    const pace = formatPace(lap.average_speed);
+    text += `  Rep ${index + 1}: ${pace}/km | Avg HR: ${Math.round(lap.average_heartrate!)}`;
+    if (lap.max_heartrate) text += ` | Max: ${Math.round(lap.max_heartrate)}`;
+    if (index > 0) {
+      const delta = Math.round(lap.average_heartrate! - workLaps[index - 1].average_heartrate!);
+      text += ` (${delta >= 0 ? '+' : ''}${delta})`;
+    }
+    text += "\n";
+  });
+  
+  const firstHR = workLaps[0].average_heartrate!;
+  const lastHR = workLaps[workLaps.length - 1].average_heartrate!;
+  const totalDrift = Math.round(lastHR - firstHR);
+  
+  text += `→ Total drift across ${workLaps.length} work reps: ${totalDrift >= 0 ? '+' : ''}${totalDrift} bpm`;
+  if (Math.abs(totalDrift) <= 2) text += " (Stable - excellent threshold endurance)";
+  else if (totalDrift > 5) text += " (Significant drift - possible fatigue/overreaching)";
+  else if (totalDrift > 3) text += " (Moderate drift - monitor closely)";
+  else if (totalDrift < -2) text += " (Negative drift - still warming up or conservative start)";
+  text += "\n";
+  
+  return text;
+};
+
+// Helper: get Monday of the week for a given date (ISO week)
+const getWeekStartMonday = (date: Date): Date => {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1); // Adjust to Monday
+  return new Date(d.setDate(diff));
+};
+
+interface WeeklyVolume {
+  weekStart: string;
+  weekLabel: string;
+  km: number;
+  hours: number;
+  sessions: number;
+  elevationGain: number;
+}
+
+// Calculate weekly training volumes for the last 4-6 weeks
+const calculateWeeklyVolumes = (activities: StravaActivity[]): WeeklyVolume[] => {
+  if (activities.length === 0) return [];
+  
+  const weekMap = new Map<string, WeeklyVolume>();
+  
+  activities.forEach(activity => {
+    const date = new Date(activity.start_date_local);
+    const weekStart = getWeekStartMonday(date);
+    const key = weekStart.toISOString().split('T')[0];
+    
+    const existing = weekMap.get(key) || {
+      weekStart: key,
+      weekLabel: '',
+      km: 0,
+      hours: 0,
+      sessions: 0,
+      elevationGain: 0
+    };
+    existing.km += activity.distance / 1000;
+    existing.hours += activity.moving_time / 3600;
+    existing.sessions += 1;
+    existing.elevationGain += activity.total_elevation_gain || 0;
+    weekMap.set(key, existing);
+  });
+  
+  const now = new Date();
+  const currentWeekStart = getWeekStartMonday(now);
+  
+  return Array.from(weekMap.values())
+    .sort((a, b) => b.weekStart.localeCompare(a.weekStart))
+    .slice(0, 6)
+    .map(week => {
+      const weekDate = new Date(week.weekStart);
+      const weeksAgo = Math.round(
+        (currentWeekStart.getTime() - weekDate.getTime()) / (7 * 24 * 60 * 60 * 1000)
+      );
+      
+      if (weeksAgo === 0) week.weekLabel = 'This week';
+      else if (weeksAgo === 1) week.weekLabel = 'Last week';
+      else week.weekLabel = `${weeksAgo}w ago`;
+      
+      return week;
+    });
+};
+
+// Format weekly volumes as a Markdown table for the prompt
+const formatWeeklyVolumesTable = (volumes: WeeklyVolume[]): string => {
+  if (volumes.length === 0) return "Not enough data for weekly breakdown.";
+  
+  let table = "| Week | Km | Hours | Sessions | Elev (m) |\n";
+  table += "|------|------|-------|----------|----------|\n";
+  
+  volumes.forEach(w => {
+    table += `| ${w.weekLabel} | ${w.km.toFixed(1)} | ${w.hours.toFixed(1)} | ${w.sessions} | +${Math.round(w.elevationGain)} |\n`;
+  });
+  
+  // Add trend indicator
+  if (volumes.length >= 2) {
+    const current = volumes[0];
+    const previous = volumes[1];
+    const kmChange = ((current.km - previous.km) / previous.km * 100).toFixed(0);
+    const direction = current.km > previous.km ? '↑' : current.km < previous.km ? '↓' : '→';
+    table += `\nWeek-over-week volume: ${direction} ${Math.abs(parseFloat(kmChange))}%`;
+    
+    if (Math.abs(parseFloat(kmChange)) > 15) {
+      table += " ⚠️ (>10% change - monitor load)";
+    }
+  }
+  
+  return table;
+};
+
+interface ConsistencyMetrics {
+  totalActivities: number;
+  weeksSpan: number;
+  avgSessionsPerWeek: number;
+  longestActiveStreak: number;
+  longestRestStreak: number;
+  restDaysLast28: number;
+  activeDaysLast28: number;
+  sessionsPerWeekLast4: number[];
+}
+
+// Calculate training consistency metrics
+const calculateConsistencyMetrics = (activities: StravaActivity[]): ConsistencyMetrics => {
+  const empty: ConsistencyMetrics = {
+    totalActivities: 0, weeksSpan: 0, avgSessionsPerWeek: 0,
+    longestActiveStreak: 0, longestRestStreak: 0,
+    restDaysLast28: 28, activeDaysLast28: 0, sessionsPerWeekLast4: []
+  };
+  
+  if (activities.length === 0) return empty;
+  
+  // Get unique activity dates
+  const activityDays = new Set<string>();
+  activities.forEach(a => {
+    const day = new Date(a.start_date_local).toISOString().split('T')[0];
+    activityDays.add(day);
+  });
+  
+  const sortedDates = [...activityDays].sort();
+  const firstDate = new Date(sortedDates[0]);
+  const lastDate = new Date(sortedDates[sortedDates.length - 1]);
+  const daysSpan = Math.max(1, Math.ceil((lastDate.getTime() - firstDate.getTime()) / (24 * 60 * 60 * 1000)));
+  const weeksSpan = Math.max(1, Math.ceil(daysSpan / 7));
+  
+  // Calculate streaks
+  const allDates: string[] = [];
+  const current = new Date(firstDate);
+  while (current <= lastDate) {
+    allDates.push(current.toISOString().split('T')[0]);
+    current.setDate(current.getDate() + 1);
+  }
+  
+  let longestActiveStreak = 0, currentActiveStreak = 0;
+  let longestRestStreak = 0, currentRestStreak = 0;
+  
+  allDates.forEach(date => {
+    if (activityDays.has(date)) {
+      currentActiveStreak++;
+      longestActiveStreak = Math.max(longestActiveStreak, currentActiveStreak);
+      longestRestStreak = Math.max(longestRestStreak, currentRestStreak);
+      currentRestStreak = 0;
+    } else {
+      currentRestStreak++;
+      longestRestStreak = Math.max(longestRestStreak, currentRestStreak);
+      longestActiveStreak = Math.max(longestActiveStreak, currentActiveStreak);
+      currentActiveStreak = 0;
+    }
+  });
+  longestActiveStreak = Math.max(longestActiveStreak, currentActiveStreak);
+  longestRestStreak = Math.max(longestRestStreak, currentRestStreak);
+  
+  // Last 28 days analysis
+  const now = new Date();
+  const twentyEightDaysAgo = new Date(now.getTime() - 28 * 24 * 60 * 60 * 1000);
+  let activeDaysLast28 = 0;
+  activityDays.forEach(day => {
+    if (new Date(day) >= twentyEightDaysAgo) activeDaysLast28++;
+  });
+  
+  // Sessions per week for last 4 weeks
+  const sessionsPerWeekLast4: number[] = [];
+  for (let w = 0; w < 4; w++) {
+    const weekEnd = new Date(now.getTime() - w * 7 * 24 * 60 * 60 * 1000);
+    const weekStart = new Date(weekEnd.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const count = activities.filter(a => {
+      const d = new Date(a.start_date_local);
+      return d >= weekStart && d < weekEnd;
+    }).length;
+    sessionsPerWeekLast4.push(count);
+  }
+  
+  return {
+    totalActivities: activities.length,
+    weeksSpan,
+    avgSessionsPerWeek: parseFloat((activities.length / weeksSpan).toFixed(1)),
+    longestActiveStreak,
+    longestRestStreak,
+    restDaysLast28: 28 - activeDaysLast28,
+    activeDaysLast28,
+    sessionsPerWeekLast4
+  };
+};
+
+// Format consistency metrics for the prompt
+const formatConsistencyMetrics = (metrics: ConsistencyMetrics): string => {
+  if (metrics.totalActivities === 0) return "Not enough data.";
+  
+  let text = "";
+  text += `• Sessions (last 4 weeks): ${metrics.sessionsPerWeekLast4.join(', ')} per week\n`;
+  text += `• Avg frequency: ${metrics.avgSessionsPerWeek} sessions/week\n`;
+  text += `• Active days (last 28d): ${metrics.activeDaysLast28} | Rest days: ${metrics.restDaysLast28}\n`;
+  text += `• Longest active streak: ${metrics.longestActiveStreak} consecutive days\n`;
+  text += `• Longest rest period: ${metrics.longestRestStreak} consecutive days\n`;
+  
+  // Flag potential issues
+  if (metrics.longestActiveStreak >= 7) {
+    text += `⚠️ ${metrics.longestActiveStreak}+ days without rest - recovery concern\n`;
+  }
+  if (metrics.longestRestStreak >= 5) {
+    text += `⚠️ ${metrics.longestRestStreak}+ consecutive rest days - consistency gap\n`;
+  }
+  
+  return text;
+};
+
+// Find the most similar historical workout for comparison
+const findSimilarWorkout = (current: StravaActivity, history: StravaActivity[], maxHR: number): string => {
+  if (history.length === 0) return "";
+  
+  const currentDist = current.distance / 1000;
+  const currentType = classifyActivityType(current, maxHR);
+  
+  // Find closest match: same type AND similar distance (within 25%)
+  let candidates = history.filter(a => {
+    const dist = a.distance / 1000;
+    const distRatio = Math.abs(dist - currentDist) / Math.max(currentDist, 0.1);
+    const type = classifyActivityType(a, maxHR);
+    return distRatio < 0.25 && type === currentType;
+  });
+  
+  // Fallback: just distance match if no type+distance match
+  if (candidates.length === 0) {
+    candidates = history.filter(a => {
+      const dist = a.distance / 1000;
+      const distRatio = Math.abs(dist - currentDist) / Math.max(currentDist, 0.1);
+      return distRatio < 0.25;
+    });
+  }
+  
+  if (candidates.length === 0) return "";
+  
+  // Get the most recent match
+  const similar = candidates.sort((a, b) => 
+    new Date(b.start_date_local).getTime() - new Date(a.start_date_local).getTime()
+  )[0];
+  
+  const similarDist = (similar.distance / 1000).toFixed(1);
+  const similarPace = formatPace(similar.average_speed);
+  const similarHR = similar.average_heartrate ? Math.round(similar.average_heartrate) : null;
+  const similarDate = formatShortDate(similar.start_date_local);
+  const similarType = classifyActivityType(similar, maxHR);
+  
+  const currentDistStr = currentDist.toFixed(1);
+  const currentPaceStr = formatPace(current.average_speed);
+  const currentHR = current.average_heartrate ? Math.round(current.average_heartrate) : null;
+  
+  let text = "\n[HISTORICAL COMPARISON]\n";
+  text += `Most similar recent session: "${similar.name}" (${similarDate}, ${similarType})\n`;
+  text += `  Previous: ${similarDist} km | ${similarPace}/km`;
+  if (similarHR) text += ` | HR: ${similarHR}`;
+  text += "\n";
+  text += `  Current:  ${currentDistStr} km | ${currentPaceStr}/km`;
+  if (currentHR) text += ` | HR: ${currentHR}`;
+  text += "\n";
+  
+  // Calculate pace difference (in seconds per km)
+  const currentPaceSec = current.average_speed > 0 ? 1000 / current.average_speed : 0;
+  const similarPaceSec = similar.average_speed > 0 ? 1000 / similar.average_speed : 0;
+  const paceDiff = currentPaceSec - similarPaceSec; // positive = slower
+  const paceAbsDiff = Math.abs(paceDiff);
+  const paceChange = paceDiff < -1 
+    ? `${Math.round(paceAbsDiff)}s/km faster`
+    : paceDiff > 1 
+      ? `${Math.round(paceAbsDiff)}s/km slower`
+      : "Same pace";
+  
+  text += `→ Pace: ${paceChange}`;
+  
+  if (currentHR && similarHR) {
+    const hrDiff = currentHR - similarHR;
+    text += ` | HR: ${hrDiff >= 0 ? '+' : ''}${hrDiff} bpm`;
+    
+    // Efficiency analysis
+    if (paceDiff < -1 && hrDiff <= 0) text += " ✅ (Faster + lower HR = IMPROVING)";
+    else if (paceDiff < -1 && hrDiff > 3) text += " (Faster but higher HR = pushing harder)";
+    else if (Math.abs(paceDiff) <= 2 && hrDiff < -3) text += " ✅ (Same pace, lower HR = aerobic improvement)";
+    else if (paceDiff > 2 && hrDiff > 0) text += " ⚠️ (Slower + higher HR = possible fatigue)";
+  }
+  text += "\n";
+  
+  return text;
+};
+
 // Generate session data block (shared between both prompts)
 const generateSessionData = (
   currentRun: StravaActivity,
@@ -507,7 +900,7 @@ const generateSessionData = (
   const duration = formatDuration(currentRun.moving_time);
   const avgPace = formatPace(currentRun.average_speed);
 
-  // GAP (Grade Adjusted Pace)
+  // GAP (Grade Adjusted Pace) - session level
   const hasGAP = currentRun.average_grade_adjusted_speed && 
                  currentRun.average_grade_adjusted_speed !== currentRun.average_speed;
   const gapPace = hasGAP 
@@ -525,8 +918,13 @@ const generateSessionData = (
   // Gear/Shoes
   const gearInfo = currentRun.gear?.name || (currentRun.gear_id ? `ID: ${currentRun.gear_id}` : "Not specified");
 
-  // Detect running type with smart heuristics
+  // Detect running type (structure: intervals, steady, etc.)
   const runType = detectRunningType(currentRun);
+  
+  // Zone-based intensity classification (more accurate than avg HR)
+  const zoneClassification = zones.length > 0 
+    ? classifyByZones(zones) 
+    : { classification: classifyActivityType(currentRun, maxHR), breakdown: "" };
   
   // Calculate decoupling (use splits for this calculation)
   const decoupling = calculateDecoupling(currentRun.splits_metric || []);
@@ -540,17 +938,19 @@ const generateSessionData = (
   const hasSplits = currentRun.splits_metric && currentRun.splits_metric.length > 0;
 
   if (hasLaps) {
-    // Use manual laps - these represent the actual workout structure
     structureText = formatLaps(currentRun.laps!, currentRun.average_speed);
     
-    // Also include auto splits as secondary data if it's a long structured workout
     if (hasSplits && runType.hasStructure && currentRun.splits_metric!.length > 3) {
       structureText += "\n" + formatSplits(currentRun.splits_metric!);
     }
   } else if (hasSplits) {
-    // Fallback to auto splits if no manual laps
     structureText = formatSplits(currentRun.splits_metric!);
   }
+
+  // Work lap HR drift (for structured workouts)
+  const hrDriftText = hasLaps 
+    ? calculateWorkLapHRDrift(currentRun.laps!, currentRun.average_speed) 
+    : "";
 
   // Format zones
   const zonesText = formatZonesForPrompt(zones);
@@ -561,9 +961,19 @@ const generateSessionData = (
     ? keyPRs.map(pr => `- ${pr.name}: ${pr.time}${pr.isPR ? ' 🏆 PR!' : ''}`).join('\n')
     : "None this session";
 
-  // Calculate training load
+  // All activities for aggregate calculations
   const allActivities = [currentRun, ...history];
-  const load = calculateTrainingLoad(allActivities);
+  
+  // Weekly volume trend (4-6 weeks)
+  const weeklyVolumes = calculateWeeklyVolumes(allActivities);
+  const weeklyTable = formatWeeklyVolumesTable(weeklyVolumes);
+  
+  // Consistency metrics
+  const consistency = calculateConsistencyMetrics(allActivities);
+  const consistencyText = formatConsistencyMetrics(consistency);
+  
+  // Historical comparison
+  const comparisonText = findSimilarWorkout(currentRun, history, maxHR);
   
   // Generate history table
   const historyTable = generateHistoryTable(history, maxHR);
@@ -573,12 +983,13 @@ const generateSessionData = (
   return `
 SESSION: "${currentRun.name}"
 Date: ${date} | Location: ${location}
-Type: ${runType.type}${runType.detected ? ' (Auto-detected)' : ''}
+Intensity: ${zoneClassification.classification} (Zone-based)${zoneClassification.breakdown ? ` [${zoneClassification.breakdown}]` : ''}
+Structure: ${runType.type}${runType.detected ? ' (Auto-detected)' : ''}
 
 ACTIVITY METRICS:
 • Distance: ${distanceKm} km
 • Duration: ${duration}
-• Pace: ${avgPace}/km${gapPace ? ` | GAP: ${gapPace}/km` : ''}
+• Pace: ${avgPace}/km${gapPace ? ` | GAP (Grade Adjusted): ${gapPace}/km` : ''}
 • Heart Rate: ${hrInfo}
 • Cadence: ${cadenceInfo}
 • Elevation: +${Math.round(currentRun.total_elevation_gain)}m
@@ -587,13 +998,16 @@ ACTIVITY METRICS:
 ${decoupling ? `• Aerobic Decoupling: ${decoupling.percentage.toFixed(1)}% (${decoupling.status})` : ''}
 ${currentRun.suffer_score ? `• Suffer Score: ${currentRun.suffer_score}` : ''}
 
-HR ZONES:
+HR ZONES (Time Distribution):
 ${zonesText}
 BEST EFFORTS:
 ${prsText}
-${structureText}
-LOAD (Last 7 Days): ${load.totalDistanceKm.toFixed(1)} km / ${load.totalHours.toFixed(1)} hrs / ${load.sessionsLast7Days} sessions
+${structureText}${hrDriftText}${comparisonText}
+WEEKLY VOLUME TREND:
+${weeklyTable}
 
+CONSISTENCY (Last 4 weeks):
+${consistencyText}
 RECENT HISTORY:
 ${historyTable}`.trim();
 };
@@ -652,9 +1066,19 @@ INITIAL ANALYSIS REQUEST
 Please analyze this initial data and provide:
 
 1. **Baseline Assessment**: Current fitness level and VDOT estimate
-2. **Training Pattern**: What does my recent history tell you?
-3. **Today's Session**: Brief analysis of the latest run
-4. **Initial Recommendations**: 2-3 priorities for my training
+2. **Training Pattern**: What does my weekly volume trend and consistency data tell you?
+3. **Intensity Distribution**: Am I doing enough easy running? Is my polarized/pyramidal balance correct?
+4. **Today's Session**: Brief analysis of the latest run (use zone classification, not just avg HR)
+5. **Recovery Patterns**: Based on the consistency data, am I getting enough rest?
+6. **Initial Recommendations**: 2-3 specific priorities for my training
+
+IMPORTANT NOTES FOR ANALYSIS:
+- Session intensity is classified by TIME IN HR ZONES, not average HR
+- "Easy / Base" means 70%+ time in Z1-Z2. Trust this over average HR which can be misleading
+- For structured workouts, check the WORK LAP HR PROGRESSION for threshold endurance
+- Rest lap recovery data shows HR drop between intervals - use this to assess aerobic fitness
+- The HISTORICAL COMPARISON section (if present) shows if I'm improving on similar sessions
+- GAP (Grade Adjusted Pace) accounts for hills - use it when elevation is significant
 
 After this, I will paste "Daily Update" messages with new sessions.
 Keep responses concise but insightful.
@@ -671,8 +1095,6 @@ const generateUpdatePrompt = (
   maxHR: number
 ): string => {
   const sessionData = generateSessionData(currentRun, history, zones, bestEfforts, rpe, maxHR);
-  const allActivities = [currentRun, ...history];
-  const load = calculateTrainingLoad(allActivities);
 
   return `
 📅 DAILY TRAINING UPDATE
@@ -683,12 +1105,14 @@ Here is my latest training session. Based on our ongoing coaching thread and my 
 ${sessionData}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-QUICK ANALYSIS REQUEST:
+ANALYSIS REQUEST:
 
-1. **Log & Compare**: How does this session fit into my recent pattern?
-2. **Trend Check**: Any changes in my Pace/HR efficiency?
-3. **Load Status**: Am I building appropriately (${load.totalDistanceKm.toFixed(1)} km last 7 days)?
-4. **Next Session**: What should I focus on next?
+1. **Session Classification**: Verify the zone-based intensity label. Was this correctly classified?
+2. **Trend Check**: Compare with the HISTORICAL COMPARISON data (if available). Am I improving?
+3. **Weekly Load**: Review the WEEKLY VOLUME TREND. Is progression safe (<10% week-over-week)?
+4. **Consistency**: Check rest day pattern. Any recovery concerns?
+5. **Interval Quality** (if applicable): Check work lap HR drift and rest recovery data
+6. **Next Session**: What should I focus on next given my weekly load and consistency?
 
 Keep it brief - just the key insights.
 `.trim();
