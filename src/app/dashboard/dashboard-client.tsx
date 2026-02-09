@@ -143,10 +143,12 @@ const RPE_LABELS: Record<number, { label: string; color: string }> = {
   10: { label: 'Maximum', color: 'text-red-500' },
 };
 
-// Classify activity type based on HR zones (Garmin-style)
+// Classify activity type based on avg HR % of maxHR (fallback when zone data unavailable)
+// Thresholds calibrated so that easy runs (e.g. HR 131 at maxHR 185 = 70.8%) are NOT mislabeled as Tempo
 const classifyActivityType = (activity: StravaActivity, maxHR: number): string => {
   // Explicit Strava workout types take priority
   if (activity.workout_type === 1) return "Race";
+  if (activity.workout_type === 3) return "Workout";
 
   // Need HR data and maxHR to classify
   if (!activity.average_heartrate || !maxHR || maxHR === 0) {
@@ -155,10 +157,11 @@ const classifyActivityType = (activity: StravaActivity, maxHR: number): string =
 
   const hrPercent = (activity.average_heartrate / maxHR) * 100;
 
-  if (hrPercent < 60) return "Recovery";
-  if (hrPercent < 70) return "Base";
-  if (hrPercent < 80) return "Tempo";
-  if (hrPercent < 90) return "Threshold";
+  // Widened Easy zone to prevent mislabeling - most runners are in Z1-Z2 up to ~76% maxHR
+  if (hrPercent < 65) return "Recovery";
+  if (hrPercent < 76) return "Easy / Base";
+  if (hrPercent < 85) return "Tempo";
+  if (hrPercent < 92) return "Threshold";
   return "VO2max";
 };
 
@@ -497,34 +500,39 @@ const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number): string => {
       ? ` | +${Math.round(lap.total_elevation_gain)}m` 
       : "";
     
-    // GAP estimate for laps with notable elevation
+    // GAP estimate for any lap with elevation gain > 3m (especially important on work laps)
     let gapInfo = "";
-    if (lap.total_elevation_gain && lap.distance > 200) {
+    if (lap.total_elevation_gain && lap.total_elevation_gain > 3 && lap.distance > 100 && lap.average_speed > 0) {
       const gradePercent = (lap.total_elevation_gain / lap.distance) * 100;
-      if (gradePercent > 0.5 && lap.average_speed > 0) {
-        const actualPaceSeconds = 1000 / lap.average_speed;
-        const gapAdjustment = gradePercent * 12; // ~12 sec/km per 1% grade
-        const gapSeconds = actualPaceSeconds - gapAdjustment;
-        if (gapSeconds > 120 && gapSeconds < actualPaceSeconds) {
-          const gapMin = Math.floor(gapSeconds / 60);
-          const gapSec = Math.floor(gapSeconds % 60);
-          gapInfo = ` | GAP: ~${gapMin}:${gapSec.toString().padStart(2, '0')}/km`;
-        }
+      const actualPaceSeconds = 1000 / lap.average_speed;
+      // ~12 sec/km per 1% grade (Strava-style GAP approximation)
+      const gapAdjustment = gradePercent * 12;
+      const gapSeconds = actualPaceSeconds - gapAdjustment;
+      if (gapSeconds > 120 && gapAdjustment > 2) { // Only show if adjustment is meaningful (>2s)
+        const gapMin = Math.floor(gapSeconds / 60);
+        const gapSec = Math.floor(gapSeconds % 60);
+        gapInfo = ` | GAP: ~${gapMin}:${gapSec.toString().padStart(2, '0')}/km`;
       }
     }
     
-    // Recovery info for rest laps
+    // Recovery info: show on ANY lap that follows a work lap and is slower (rest/jog between reps)
+    // This captures rest laps even if not explicitly labeled as "Recovery"
+    const isSlowerThanWork = lastWorkLapMaxHR !== null && (isRestLap || (
+      !isWarmCool && lap.average_speed > 0 && avgSessionPace > 0 &&
+      (1000 / lap.average_speed) > avgSessionPace * 1.05 // at least 5% slower than session avg
+    ));
+    
     let recoveryInfo = "";
-    if (isRestLap && lastWorkLapMaxHR && lap.average_heartrate) {
+    if (isSlowerThanWork && lastWorkLapMaxHR && lap.average_heartrate) {
       const hrDrop = lastWorkLapMaxHR - lap.average_heartrate;
       if (hrDrop > 0) {
-        recoveryInfo = ` | Recovery: -${Math.round(hrDrop)} bpm from prev peak`;
+        recoveryInfo = ` | HR Recovery: -${Math.round(hrDrop)} bpm from prev peak (${Math.round(lastWorkLapMaxHR)} → ${Math.round(lap.average_heartrate)})`;
       }
     }
 
     // Standing rest detection (very little distance for elapsed time)
     let restNote = "";
-    if (isRestLap && lap.elapsed_time > 0) {
+    if ((isRestLap || isSlowerThanWork) && lap.elapsed_time > 0) {
       const standingTime = lap.elapsed_time - lap.moving_time;
       if (standingTime > 10) {
         restNote = ` | Standing rest: ${formatDuration(standingTime)}`;
@@ -535,9 +543,11 @@ const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number): string => {
     if (lapType) text += ` ${lapType}`;
     text += "\n";
     
-    // Track work lap HR for recovery calculation
-    if (!isRestLap && !isWarmCool && lap.max_heartrate) {
-      lastWorkLapMaxHR = lap.max_heartrate;
+    // Track work lap HR: any lap that's faster than session average and not warmup/cooldown
+    const isWorkLap = !isRestLap && !isWarmCool && lap.average_speed > 0 &&
+      (1000 / lap.average_speed) < avgSessionPace * 0.95 && lap.max_heartrate;
+    if (isWorkLap) {
+      lastWorkLapMaxHR = lap.max_heartrate!;
     }
   });
   
@@ -677,16 +687,34 @@ const formatWeeklyVolumesTable = (volumes: WeeklyVolume[]): string => {
     table += `| ${w.weekLabel} | ${w.km.toFixed(1)} | ${w.hours.toFixed(1)} | ${w.sessions} | +${Math.round(w.elevationGain)} |\n`;
   });
   
-  // Add trend indicator
+  // Trend indicators: week-over-week AND vs 4-week rolling average
   if (volumes.length >= 2) {
     const current = volumes[0];
     const previous = volumes[1];
-    const kmChange = ((current.km - previous.km) / previous.km * 100).toFixed(0);
-    const direction = current.km > previous.km ? '↑' : current.km < previous.km ? '↓' : '→';
-    table += `\nWeek-over-week volume: ${direction} ${Math.abs(parseFloat(kmChange))}%`;
     
-    if (Math.abs(parseFloat(kmChange)) > 15) {
-      table += " ⚠️ (>10% change - monitor load)";
+    // Week-over-week change
+    if (previous.km > 0) {
+      const wowChange = ((current.km - previous.km) / previous.km * 100);
+      const wowDir = wowChange > 0 ? '↑' : wowChange < 0 ? '↓' : '→';
+      table += `\nWeek-over-week: ${wowDir} ${Math.abs(wowChange).toFixed(0)}% (${previous.km.toFixed(1)} → ${current.km.toFixed(1)} km)`;
+    }
+    
+    // 4-week rolling average comparison (more meaningful than single week)
+    if (volumes.length >= 3) {
+      const avgWeeks = volumes.slice(1, Math.min(5, volumes.length)); // weeks 2-5 (excluding current)
+      const rollingAvg = avgWeeks.reduce((sum, w) => sum + w.km, 0) / avgWeeks.length;
+      
+      if (rollingAvg > 0) {
+        const vsAvgChange = ((current.km - rollingAvg) / rollingAvg * 100);
+        const vsAvgDir = vsAvgChange > 0 ? '↑' : vsAvgChange < 0 ? '↓' : '→';
+        table += `\nVs ${avgWeeks.length}-week avg (${rollingAvg.toFixed(1)} km): ${vsAvgDir} ${Math.abs(vsAvgChange).toFixed(0)}%`;
+        
+        if (vsAvgChange > 10) {
+          table += " ⚠️ (>10% above rolling average)";
+        } else if (vsAvgChange <= 10 && vsAvgChange > 0) {
+          table += " ✅ (safe progression)";
+        }
+      }
     }
   }
   
@@ -808,22 +836,38 @@ const formatConsistencyMetrics = (metrics: ConsistencyMetrics): string => {
   return text;
 };
 
+// Determine workout structure category for matching (more specific than intensity)
+const getWorkoutStructure = (activity: StravaActivity): string => {
+  if (activity.workout_type === 1) return "race";
+  if (activity.workout_type === 3) return "structured";
+  if (activity.workout_type === 2) return "long_run";
+  // Heuristic: check if it has many laps with pace variance (structured without label)
+  if (activity.laps && activity.laps.length >= 4) return "structured";
+  return "steady";
+};
+
 // Find the most similar historical workout for comparison
+// Matches on STRUCTURE (steady vs structured vs long run) + distance, NOT just intensity label
 const findSimilarWorkout = (current: StravaActivity, history: StravaActivity[], maxHR: number): string => {
   if (history.length === 0) return "";
   
   const currentDist = current.distance / 1000;
-  const currentType = classifyActivityType(current, maxHR);
+  const currentStructure = getWorkoutStructure(current);
   
-  // Find closest match: same type AND similar distance (within 25%)
+  // Priority 1: Same structure AND similar distance (within 25%)
   let candidates = history.filter(a => {
     const dist = a.distance / 1000;
     const distRatio = Math.abs(dist - currentDist) / Math.max(currentDist, 0.1);
-    const type = classifyActivityType(a, maxHR);
-    return distRatio < 0.25 && type === currentType;
+    const structure = getWorkoutStructure(a);
+    return distRatio < 0.25 && structure === currentStructure;
   });
   
-  // Fallback: just distance match if no type+distance match
+  // Priority 2: Same structure, any distance (if no distance match)
+  if (candidates.length === 0) {
+    candidates = history.filter(a => getWorkoutStructure(a) === currentStructure);
+  }
+  
+  // Priority 3: Similar distance regardless of structure (last resort)
   if (candidates.length === 0) {
     candidates = history.filter(a => {
       const dist = a.distance / 1000;
@@ -834,27 +878,40 @@ const findSimilarWorkout = (current: StravaActivity, history: StravaActivity[], 
   
   if (candidates.length === 0) return "";
   
-  // Get the most recent match
-  const similar = candidates.sort((a, b) => 
-    new Date(b.start_date_local).getTime() - new Date(a.start_date_local).getTime()
-  )[0];
+  // Score candidates: prefer same distance + same structure + most recent
+  const scored = candidates.map(a => {
+    const dist = a.distance / 1000;
+    const distScore = 1 - Math.abs(dist - currentDist) / Math.max(currentDist, 0.1);
+    const structureScore = getWorkoutStructure(a) === currentStructure ? 1 : 0;
+    const recency = new Date(a.start_date_local).getTime();
+    return { activity: a, score: distScore * 2 + structureScore * 3, recency };
+  });
+  
+  // Sort by score (desc), then recency (desc)
+  scored.sort((a, b) => b.score - a.score || b.recency - a.recency);
+  const similar = scored[0].activity;
   
   const similarDist = (similar.distance / 1000).toFixed(1);
   const similarPace = formatPace(similar.average_speed);
   const similarHR = similar.average_heartrate ? Math.round(similar.average_heartrate) : null;
   const similarDate = formatShortDate(similar.start_date_local);
   const similarType = classifyActivityType(similar, maxHR);
+  const similarStructure = getWorkoutStructure(similar);
+  const currentStructureLabel = currentStructure === 'structured' ? 'Structured' 
+    : currentStructure === 'long_run' ? 'Long Run' 
+    : currentStructure === 'race' ? 'Race' : 'Steady';
+  const matchQuality = similarStructure === currentStructure ? "exact structure match" : "approximate match (different structure)";
   
   const currentDistStr = currentDist.toFixed(1);
   const currentPaceStr = formatPace(current.average_speed);
   const currentHR = current.average_heartrate ? Math.round(current.average_heartrate) : null;
   
   let text = "\n[HISTORICAL COMPARISON]\n";
-  text += `Most similar recent session: "${similar.name}" (${similarDate}, ${similarType})\n`;
-  text += `  Previous: ${similarDist} km | ${similarPace}/km`;
+  text += `Comparing ${currentStructureLabel} sessions (${matchQuality}):\n`;
+  text += `  Previous: "${similar.name}" (${similarDate}) - ${similarDist} km | ${similarPace}/km`;
   if (similarHR) text += ` | HR: ${similarHR}`;
   text += "\n";
-  text += `  Current:  ${currentDistStr} km | ${currentPaceStr}/km`;
+  text += `  Current:  "${current.name}" - ${currentDistStr} km | ${currentPaceStr}/km`;
   if (currentHR) text += ` | HR: ${currentHR}`;
   text += "\n";
   
@@ -875,11 +932,15 @@ const findSimilarWorkout = (current: StravaActivity, history: StravaActivity[], 
     const hrDiff = currentHR - similarHR;
     text += ` | HR: ${hrDiff >= 0 ? '+' : ''}${hrDiff} bpm`;
     
-    // Efficiency analysis
-    if (paceDiff < -1 && hrDiff <= 0) text += " ✅ (Faster + lower HR = IMPROVING)";
-    else if (paceDiff < -1 && hrDiff > 3) text += " (Faster but higher HR = pushing harder)";
-    else if (Math.abs(paceDiff) <= 2 && hrDiff < -3) text += " ✅ (Same pace, lower HR = aerobic improvement)";
-    else if (paceDiff > 2 && hrDiff > 0) text += " ⚠️ (Slower + higher HR = possible fatigue)";
+    // Only give efficiency verdict if structure matches well
+    if (similarStructure === currentStructure) {
+      if (paceDiff < -1 && hrDiff <= 0) text += " ✅ (Faster + lower HR = IMPROVING)";
+      else if (paceDiff < -1 && hrDiff > 3) text += " (Faster but higher HR = pushing harder)";
+      else if (Math.abs(paceDiff) <= 2 && hrDiff < -3) text += " ✅ (Same pace, lower HR = aerobic improvement)";
+      else if (paceDiff > 2 && hrDiff > 0) text += " ⚠️ (Slower + higher HR = possible fatigue)";
+    } else {
+      text += " (⚠️ different workout structure - compare with caution)";
+    }
   }
   text += "\n";
   
