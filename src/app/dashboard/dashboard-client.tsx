@@ -477,13 +477,18 @@ const guessLapType = (lap: StravaLap, avgSessionPace: number): string => {
 
 // Format laps for structured workouts (manual lap button presses)
 // Enhanced: identifies rest laps, shows recovery HR, GAP estimates
-const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number): string => {
+// Treadmill mode: GPS pace/distance is unreliable, show only time + HR
+const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number, isTreadmill: boolean = false): string => {
   if (!laps || laps.length === 0) return "";
   
   // Calculate session average pace in seconds/km
   const avgSessionPace = sessionAvgSpeed > 0 ? 1000 / sessionAvgSpeed : 0;
   
   let text = "\n[WORKOUT STRUCTURE (Manual Laps)]\n";
+  if (isTreadmill) {
+    text += "⚠️ TREADMILL: GPS pace/distance per lap is UNRELIABLE. Use activity-level pace (from treadmill calibration) as truth.\n";
+    text += "   Lap HR data and time are still accurate and useful for analysis.\n";
+  }
   text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
   
   let lastWorkLapMaxHR: number | null = null;
@@ -492,7 +497,7 @@ const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number): string => {
     const lapPace = formatPace(lap.average_speed);
     const lapTime = formatDuration(lap.elapsed_time);
     const lapDist = (lap.distance / 1000).toFixed(2);
-    const lapType = guessLapType(lap, avgSessionPace);
+    const lapType = isTreadmill ? '' : guessLapType(lap, avgSessionPace);
     const isRestLap = lapType.includes('Recovery');
     const isWarmCool = lapType.includes('Warmup') || lapType.includes('Cooldown');
     
@@ -500,58 +505,90 @@ const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number): string => {
       ? `HR: ${Math.round(lap.average_heartrate)} | Max: ${Math.round(lap.max_heartrate || 0)}`
       : "HR: -";
     
-    const elevInfo = lap.total_elevation_gain && lap.total_elevation_gain > 5 
-      ? ` | +${Math.round(lap.total_elevation_gain)}m` 
-      : "";
-    
-    // GAP estimate for any lap with elevation gain > 3m (especially important on work laps)
-    let gapInfo = "";
-    if (lap.total_elevation_gain && lap.total_elevation_gain > 3 && lap.distance > 100 && lap.average_speed > 0) {
-      const gradePercent = (lap.total_elevation_gain / lap.distance) * 100;
-      const actualPaceSeconds = 1000 / lap.average_speed;
-      // ~12 sec/km per 1% grade (Strava-style GAP approximation)
-      const gapAdjustment = gradePercent * 12;
-      const gapSeconds = actualPaceSeconds - gapAdjustment;
-      if (gapSeconds > 120 && gapAdjustment > 2) { // Only show if adjustment is meaningful (>2s)
-        const gapMin = Math.floor(gapSeconds / 60);
-        const gapSec = Math.floor(gapSeconds % 60);
-        gapInfo = ` | GAP: ~${gapMin}:${gapSec.toString().padStart(2, '0')}/km`;
+    if (isTreadmill) {
+      // TREADMILL MODE: show time + HR only (these are reliable)
+      // Detect rest laps by HR drop instead of pace (since GPS pace is junk)
+      let recoveryInfo = "";
+      if (lastWorkLapMaxHR && lap.average_heartrate) {
+        const hrDrop = lastWorkLapMaxHR - lap.average_heartrate;
+        // On treadmill, a significant HR drop between laps indicates rest
+        if (hrDrop > 10) {
+          recoveryInfo = ` | HR Recovery: -${Math.round(hrDrop)} bpm (${Math.round(lastWorkLapMaxHR)} → ${Math.round(lap.average_heartrate)}) 😮‍💨 Rest`;
+        }
       }
-    }
-    
-    // Recovery info: show on ANY lap that follows a work lap and is slower (rest/jog between reps)
-    // This captures rest laps even if not explicitly labeled as "Recovery"
-    const isSlowerThanWork = lastWorkLapMaxHR !== null && (isRestLap || (
-      !isWarmCool && lap.average_speed > 0 && avgSessionPace > 0 &&
-      (1000 / lap.average_speed) > avgSessionPace * 1.05 // at least 5% slower than session avg
-    ));
-    
-    let recoveryInfo = "";
-    if (isSlowerThanWork && lastWorkLapMaxHR && lap.average_heartrate) {
-      const hrDrop = lastWorkLapMaxHR - lap.average_heartrate;
-      if (hrDrop > 0) {
-        recoveryInfo = ` | HR Recovery: -${Math.round(hrDrop)} bpm from prev peak (${Math.round(lastWorkLapMaxHR)} → ${Math.round(lap.average_heartrate)})`;
+      
+      // Standing rest detection
+      let restNote = "";
+      if (lap.elapsed_time > 0) {
+        const standingTime = lap.elapsed_time - lap.moving_time;
+        if (standingTime > 10) {
+          restNote = ` | Standing rest: ${formatDuration(standingTime)}`;
+        }
       }
-    }
+      
+      text += `Lap ${index + 1}: ${lapTime} | ${hrInfo}${recoveryInfo}${restNote}\n`;
+      
+      // Track work lap HR: use HR level instead of pace for treadmill
+      if (lap.max_heartrate && lap.average_heartrate) {
+        const isLikelyWork = !lastWorkLapMaxHR || 
+          (lap.average_heartrate > (lastWorkLapMaxHR - 15)); // HR didn't drop significantly
+        if (isLikelyWork) {
+          lastWorkLapMaxHR = lap.max_heartrate;
+        }
+      }
+    } else {
+      // OUTDOOR MODE: full data including pace, distance, elevation, GAP
+      const elevInfo = lap.total_elevation_gain && lap.total_elevation_gain > 5 
+        ? ` | +${Math.round(lap.total_elevation_gain)}m` 
+        : "";
+      
+      // GAP estimate for any lap with elevation gain > 3m
+      let gapInfo = "";
+      if (lap.total_elevation_gain && lap.total_elevation_gain > 3 && lap.distance > 100 && lap.average_speed > 0) {
+        const gradePercent = (lap.total_elevation_gain / lap.distance) * 100;
+        const actualPaceSeconds = 1000 / lap.average_speed;
+        const gapAdjustment = gradePercent * 12;
+        const gapSeconds = actualPaceSeconds - gapAdjustment;
+        if (gapSeconds > 120 && gapAdjustment > 2) {
+          const gapMin = Math.floor(gapSeconds / 60);
+          const gapSec = Math.floor(gapSeconds % 60);
+          gapInfo = ` | GAP: ~${gapMin}:${gapSec.toString().padStart(2, '0')}/km`;
+        }
+      }
+      
+      // Recovery info: show on ANY lap that follows a work lap and is slower
+      const isSlowerThanWork = lastWorkLapMaxHR !== null && (isRestLap || (
+        !isWarmCool && lap.average_speed > 0 && avgSessionPace > 0 &&
+        (1000 / lap.average_speed) > avgSessionPace * 1.05
+      ));
+      
+      let recoveryInfo = "";
+      if (isSlowerThanWork && lastWorkLapMaxHR && lap.average_heartrate) {
+        const hrDrop = lastWorkLapMaxHR - lap.average_heartrate;
+        if (hrDrop > 0) {
+          recoveryInfo = ` | HR Recovery: -${Math.round(hrDrop)} bpm from prev peak (${Math.round(lastWorkLapMaxHR)} → ${Math.round(lap.average_heartrate)})`;
+        }
+      }
 
-    // Standing rest detection (very little distance for elapsed time)
-    let restNote = "";
-    if ((isRestLap || isSlowerThanWork) && lap.elapsed_time > 0) {
-      const standingTime = lap.elapsed_time - lap.moving_time;
-      if (standingTime > 10) {
-        restNote = ` | Standing rest: ${formatDuration(standingTime)}`;
+      // Standing rest detection
+      let restNote = "";
+      if ((isRestLap || isSlowerThanWork) && lap.elapsed_time > 0) {
+        const standingTime = lap.elapsed_time - lap.moving_time;
+        if (standingTime > 10) {
+          restNote = ` | Standing rest: ${formatDuration(standingTime)}`;
+        }
       }
-    }
-    
-    text += `Lap ${index + 1}: ${lapTime} | ${lapDist} km | ${lapPace}/km | ${hrInfo}${elevInfo}${gapInfo}${recoveryInfo}${restNote}`;
-    if (lapType) text += ` ${lapType}`;
-    text += "\n";
-    
-    // Track work lap HR: any lap that's faster than session average and not warmup/cooldown
-    const isWorkLap = !isRestLap && !isWarmCool && lap.average_speed > 0 &&
-      (1000 / lap.average_speed) < avgSessionPace * 0.95 && lap.max_heartrate;
-    if (isWorkLap) {
-      lastWorkLapMaxHR = lap.max_heartrate!;
+      
+      text += `Lap ${index + 1}: ${lapTime} | ${lapDist} km | ${lapPace}/km | ${hrInfo}${elevInfo}${gapInfo}${recoveryInfo}${restNote}`;
+      if (lapType) text += ` ${lapType}`;
+      text += "\n";
+      
+      // Track work lap HR: pace-based detection for outdoor
+      const isWorkLap = !isRestLap && !isWarmCool && lap.average_speed > 0 &&
+        (1000 / lap.average_speed) < avgSessionPace * 0.95 && lap.max_heartrate;
+      if (isWorkLap) {
+        lastWorkLapMaxHR = lap.max_heartrate!;
+      }
     }
   });
   
@@ -573,27 +610,46 @@ const formatSplits = (splits: any[]): string => {
 };
 
 // Calculate HR drift across work laps in structured workouts
-const calculateWorkLapHRDrift = (laps: StravaLap[], sessionAvgSpeed: number): string => {
+// Treadmill mode: identify work laps by HR level instead of pace (GPS unreliable)
+const calculateWorkLapHRDrift = (laps: StravaLap[], sessionAvgSpeed: number, isTreadmill: boolean = false): string => {
   if (!laps || laps.length < 3) return "";
   
   const avgSessionPace = sessionAvgSpeed > 0 ? 1000 / sessionAvgSpeed : 0;
   
-  // Identify work laps (faster than ~95% of session avg pace, with HR data, substantial distance)
-  const workLaps = laps.filter(lap => {
-    if (!lap.average_heartrate || lap.average_heartrate === 0) return false;
-    if (lap.distance < 200) return false;
-    const lapPaceSeconds = lap.average_speed > 0 ? 1000 / lap.average_speed : 0;
-    const paceRatio = lapPaceSeconds / avgSessionPace;
-    return paceRatio < 0.95; // Faster than session average
-  });
+  let workLaps: StravaLap[];
+  
+  if (isTreadmill) {
+    // TREADMILL: identify work laps by HR - find laps with higher-than-average HR
+    const lapsWithHR = laps.filter(l => l.average_heartrate && l.average_heartrate > 0);
+    if (lapsWithHR.length < 3) return "";
+    const avgHR = lapsWithHR.reduce((sum, l) => sum + l.average_heartrate!, 0) / lapsWithHR.length;
+    // Work laps have HR above the session average (hard efforts)
+    workLaps = lapsWithHR.filter(lap => lap.average_heartrate! > avgHR + 3);
+  } else {
+    // OUTDOOR: identify work laps by pace (faster than session average)
+    workLaps = laps.filter(lap => {
+      if (!lap.average_heartrate || lap.average_heartrate === 0) return false;
+      if (lap.distance < 200) return false;
+      const lapPaceSeconds = lap.average_speed > 0 ? 1000 / lap.average_speed : 0;
+      const paceRatio = lapPaceSeconds / avgSessionPace;
+      return paceRatio < 0.95;
+    });
+  }
   
   if (workLaps.length < 2) return "";
   
   let text = "\n[WORK LAP HR PROGRESSION]\n";
+  if (isTreadmill) {
+    text += "(Work laps identified by HR level - GPS pace unreliable on treadmill)\n";
+  }
   
   workLaps.forEach((lap, index) => {
-    const pace = formatPace(lap.average_speed);
-    text += `  Rep ${index + 1}: ${pace}/km | Avg HR: ${Math.round(lap.average_heartrate!)}`;
+    if (isTreadmill) {
+      text += `  Rep ${index + 1}: ${formatDuration(lap.elapsed_time)} | Avg HR: ${Math.round(lap.average_heartrate!)}`;
+    } else {
+      const pace = formatPace(lap.average_speed);
+      text += `  Rep ${index + 1}: ${pace}/km | Avg HR: ${Math.round(lap.average_heartrate!)}`;
+    }
     if (lap.max_heartrate) text += ` | Max: ${Math.round(lap.max_heartrate)}`;
     if (index > 0) {
       const delta = Math.round(lap.average_heartrate! - workLaps[index - 1].average_heartrate!);
@@ -965,8 +1021,8 @@ const generateSessionData = (
   const duration = formatDuration(currentRun.moving_time);
   const avgPace = formatPace(currentRun.average_speed);
 
-  // GAP (Grade Adjusted Pace) - session level
-  const hasGAP = currentRun.average_grade_adjusted_speed && 
+  // GAP (Grade Adjusted Pace) - session level (not relevant for treadmill)
+  const hasGAP = !currentRun.trainer && currentRun.average_grade_adjusted_speed && 
                  currentRun.average_grade_adjusted_speed !== currentRun.average_speed;
   const gapPace = hasGAP 
     ? formatPace(currentRun.average_grade_adjusted_speed!)
@@ -991,8 +1047,10 @@ const generateSessionData = (
     ? classifyByZones(zones) 
     : { classification: classifyActivityType(currentRun, maxHR), breakdown: "" };
   
-  // Calculate decoupling (use splits for this calculation)
-  const decoupling = calculateDecoupling(currentRun.splits_metric || []);
+  const isTreadmill = currentRun.trainer === true;
+
+  // Calculate decoupling (splits are GPS-based, unreliable on treadmill)
+  const decoupling = !isTreadmill ? calculateDecoupling(currentRun.splits_metric || []) : null;
 
   // RPE info
   const rpeLabel = RPE_LABELS[rpe]?.label || 'Moderate';
@@ -1003,18 +1061,20 @@ const generateSessionData = (
   const hasSplits = currentRun.splits_metric && currentRun.splits_metric.length > 0;
 
   if (hasLaps) {
-    structureText = formatLaps(currentRun.laps!, currentRun.average_speed);
+    structureText = formatLaps(currentRun.laps!, currentRun.average_speed, isTreadmill);
     
-    if (hasSplits && runType.hasStructure && currentRun.splits_metric!.length > 3) {
+    // For outdoor structured workouts, also include auto splits as secondary data
+    if (!isTreadmill && hasSplits && runType.hasStructure && currentRun.splits_metric!.length > 3) {
       structureText += "\n" + formatSplits(currentRun.splits_metric!);
     }
-  } else if (hasSplits) {
+  } else if (hasSplits && !isTreadmill) {
+    // Auto splits are GPS-based, only useful outdoors
     structureText = formatSplits(currentRun.splits_metric!);
   }
 
   // Work lap HR drift (for structured workouts)
   const hrDriftText = hasLaps 
-    ? calculateWorkLapHRDrift(currentRun.laps!, currentRun.average_speed) 
+    ? calculateWorkLapHRDrift(currentRun.laps!, currentRun.average_speed, isTreadmill) 
     : "";
 
   // Format zones
