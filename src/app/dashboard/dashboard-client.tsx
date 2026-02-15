@@ -241,8 +241,38 @@ const detectRunningType = (activity: StravaActivity): { type: string; detected: 
   return { type: 'Steady Run', detected: true, hasStructure: false };
 };
 
-// Calculate Aerobic Decoupling (Cardiac Drift)
-const calculateDecoupling = (splits: any[]): { percentage: number; status: string } | null => {
+// Convert raw speed to Grade Adjusted Speed using elevation difference per split
+// Formula: ~12 sec/km per 1% uphill grade, ~8 sec/km benefit per 1% downhill (capped)
+const getGradeAdjustedSpeed = (split: any): number => {
+  const rawSpeed = split.average_speed; // m/s
+  if (!rawSpeed || rawSpeed <= 0) return 0;
+
+  // If no elevation data, return raw speed (no adjustment possible)
+  if (split.elevation_difference === undefined || split.elevation_difference === null || split.distance <= 0) {
+    return rawSpeed;
+  }
+
+  const gradePercent = (split.elevation_difference / split.distance) * 100;
+  const rawPaceSecPerKm = 1000 / rawSpeed;
+
+  // Adjustment: uphill adds time (harder), downhill subtracts (easier, but capped benefit)
+  let adjustment: number;
+  if (gradePercent >= 0) {
+    adjustment = gradePercent * 12; // +12 sec/km per 1% uphill
+  } else {
+    adjustment = gradePercent * 8;  // -8 sec/km per 1% downhill (less benefit going down)
+  }
+
+  const gapPaceSecPerKm = rawPaceSecPerKm - adjustment; // subtract because uphill adjustment is positive
+  if (gapPaceSecPerKm <= 0) return rawSpeed; // sanity check
+
+  return 1000 / gapPaceSecPerKm; // convert back to m/s
+};
+
+// Calculate Aerobic Decoupling (Cardiac Drift) - ELEVATION ADJUSTED
+// Uses Grade Adjusted Pace (GAP) so that out-and-back courses with elevation
+// don't produce false drift readings (e.g., downhill first half, uphill return)
+const calculateDecoupling = (splits: any[]): { percentage: number; status: string; elevationAdjusted: boolean } | null => {
   if (!splits || splits.length < 4) return null;
   
   // Filter valid splits with both pace and HR data
@@ -251,14 +281,20 @@ const calculateDecoupling = (splits: any[]): { percentage: number; status: strin
   );
   
   if (validSplits.length < 4) return null;
+
+  // Check if elevation data is available for adjustment
+  const hasElevation = validSplits.some((s: any) => 
+    s.elevation_difference !== undefined && s.elevation_difference !== null
+  );
   
   const midpoint = Math.floor(validSplits.length / 2);
   const firstHalf = validSplits.slice(0, midpoint);
   const secondHalf = validSplits.slice(midpoint);
   
-  // Calculate Efficiency Factor (EF) = Speed / HR for each half
+  // Calculate Efficiency Factor (EF) = GAP_Speed / HR for each half
+  // Using GAP accounts for terrain so uphill return legs don't inflate drift
   const calcEF = (splits: any[]) => {
-    const totalSpeed = splits.reduce((sum: number, s: any) => sum + s.average_speed, 0);
+    const totalSpeed = splits.reduce((sum: number, s: any) => sum + getGradeAdjustedSpeed(s), 0);
     const totalHR = splits.reduce((sum: number, s: any) => sum + s.average_heartrate, 0);
     return (totalSpeed / splits.length) / (totalHR / splits.length);
   };
@@ -275,7 +311,7 @@ const calculateDecoupling = (splits: any[]): { percentage: number; status: strin
   else if (decoupling < 8) status = 'Moderate Drift';
   else status = 'High Drift (threshold+)';
   
-  return { percentage: decoupling, status };
+  return { percentage: decoupling, status, elevationAdjusted: hasElevation };
 };
 
 // Filter valid runs
@@ -1125,7 +1161,7 @@ ACTIVITY METRICS:
 • Elevation: +${Math.round(currentRun.total_elevation_gain)}m
 • Shoes/Gear: ${gearInfo}
 • RPE: ${rpe}/10 (${rpeLabel}) - User Input
-${decoupling ? `• Aerobic Decoupling: ${decoupling.percentage.toFixed(1)}% (${decoupling.status})` : ''}
+${decoupling ? `• Aerobic Decoupling: ${decoupling.percentage.toFixed(1)}% (${decoupling.status})${decoupling.elevationAdjusted ? ' [Elevation-adjusted using GAP]' : ' [No elevation data - raw pace]'}` : ''}
 ${currentRun.suffer_score ? `• Suffer Score: ${currentRun.suffer_score}` : ''}
 
 HR ZONES (Time Distribution):
