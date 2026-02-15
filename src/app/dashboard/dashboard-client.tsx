@@ -943,28 +943,59 @@ const getWorkoutStructure = (activity: StravaActivity): string => {
   return "steady";
 };
 
+// Get the best comparable pace for an activity:
+// - Outdoor with GAP available: use GAP (elevation-adjusted)
+// - Outdoor without GAP: use raw pace
+// - Treadmill: use raw pace (from treadmill calibration, GPS is junk)
+const getComparablePace = (activity: StravaActivity): { speed: number; label: string } => {
+  if (activity.trainer) {
+    return { speed: activity.average_speed, label: "Treadmill pace" };
+  }
+  if (activity.average_grade_adjusted_speed && activity.average_grade_adjusted_speed !== activity.average_speed) {
+    return { speed: activity.average_grade_adjusted_speed, label: "GAP" };
+  }
+  return { speed: activity.average_speed, label: "Pace" };
+};
+
 // Find the most similar historical workout for comparison
-// Matches on STRUCTURE (steady vs structured vs long run) + distance, NOT just intensity label
+// Matches on STRUCTURE + LOCATION (treadmill/outdoor) + distance
+// Uses GAP for outdoor comparisons to account for elevation differences
 const findSimilarWorkout = (current: StravaActivity, history: StravaActivity[], maxHR: number): string => {
   if (history.length === 0) return "";
   
   const currentDist = current.distance / 1000;
   const currentStructure = getWorkoutStructure(current);
+  const currentIsTreadmill = current.trainer === true;
   
-  // Priority 1: Same structure AND similar distance (within 25%)
+  // Priority 1: Same structure + same location type + similar distance (within 25%)
   let candidates = history.filter(a => {
     const dist = a.distance / 1000;
     const distRatio = Math.abs(dist - currentDist) / Math.max(currentDist, 0.1);
     const structure = getWorkoutStructure(a);
-    return distRatio < 0.25 && structure === currentStructure;
+    const sameLocation = (a.trainer === true) === currentIsTreadmill;
+    return distRatio < 0.25 && structure === currentStructure && sameLocation;
   });
   
-  // Priority 2: Same structure, any distance (if no distance match)
+  // Priority 2: Same structure + same location, any distance
   if (candidates.length === 0) {
-    candidates = history.filter(a => getWorkoutStructure(a) === currentStructure);
+    candidates = history.filter(a => {
+      const structure = getWorkoutStructure(a);
+      const sameLocation = (a.trainer === true) === currentIsTreadmill;
+      return structure === currentStructure && sameLocation;
+    });
   }
   
-  // Priority 3: Similar distance regardless of structure (last resort)
+  // Priority 3: Same structure + similar distance (cross-location)
+  if (candidates.length === 0) {
+    candidates = history.filter(a => {
+      const dist = a.distance / 1000;
+      const distRatio = Math.abs(dist - currentDist) / Math.max(currentDist, 0.1);
+      const structure = getWorkoutStructure(a);
+      return distRatio < 0.25 && structure === currentStructure;
+    });
+  }
+
+  // Priority 4: Similar distance regardless of structure (last resort)
   if (candidates.length === 0) {
     candidates = history.filter(a => {
       const dist = a.distance / 1000;
@@ -975,46 +1006,67 @@ const findSimilarWorkout = (current: StravaActivity, history: StravaActivity[], 
   
   if (candidates.length === 0) return "";
   
-  // Score candidates: prefer same distance + same structure + most recent
+  // Score candidates: structure > location > distance > recency
   const scored = candidates.map(a => {
     const dist = a.distance / 1000;
     const distScore = 1 - Math.abs(dist - currentDist) / Math.max(currentDist, 0.1);
     const structureScore = getWorkoutStructure(a) === currentStructure ? 1 : 0;
+    const locationScore = (a.trainer === true) === currentIsTreadmill ? 1 : 0;
     const recency = new Date(a.start_date_local).getTime();
-    return { activity: a, score: distScore * 2 + structureScore * 3, recency };
+    return { activity: a, score: structureScore * 4 + locationScore * 3 + distScore * 2, recency };
   });
   
-  // Sort by score (desc), then recency (desc)
   scored.sort((a, b) => b.score - a.score || b.recency - a.recency);
   const similar = scored[0].activity;
   
   const similarDist = (similar.distance / 1000).toFixed(1);
-  const similarPace = formatPace(similar.average_speed);
   const similarHR = similar.average_heartrate ? Math.round(similar.average_heartrate) : null;
   const similarDate = formatShortDate(similar.start_date_local);
-  const similarType = classifyActivityType(similar, maxHR);
   const similarStructure = getWorkoutStructure(similar);
+  const similarIsTreadmill = similar.trainer === true;
+
   const currentStructureLabel = currentStructure === 'structured' ? 'Structured' 
     : currentStructure === 'long_run' ? 'Long Run' 
     : currentStructure === 'race' ? 'Race' : 'Steady';
-  const matchQuality = similarStructure === currentStructure ? "exact structure match" : "approximate match (different structure)";
+  
+  // Match quality assessment
+  const structureMatch = similarStructure === currentStructure;
+  const locationMatch = similarIsTreadmill === currentIsTreadmill;
+  let matchQuality: string;
+  if (structureMatch && locationMatch) matchQuality = "exact match (same structure & location)";
+  else if (structureMatch) matchQuality = "structure match, different location";
+  else matchQuality = "approximate match";
+
+  // Use GAP-adjusted pace for fair comparison (accounts for elevation)
+  const currentPace = getComparablePace(current);
+  const similarPace = getComparablePace(similar);
   
   const currentDistStr = currentDist.toFixed(1);
-  const currentPaceStr = formatPace(current.average_speed);
+  const currentPaceStr = formatPace(currentPace.speed);
+  const similarPaceStr = formatPace(similarPace.speed);
   const currentHR = current.average_heartrate ? Math.round(current.average_heartrate) : null;
+  
+  const currentLocation = currentIsTreadmill ? "🏠 Treadmill" : "🌳 Outdoor";
+  const similarLocation = similarIsTreadmill ? "🏠 Treadmill" : "🌳 Outdoor";
+  
+  // Elevation context
+  const currentElev = Math.round(current.total_elevation_gain || 0);
+  const similarElev = Math.round(similar.total_elevation_gain || 0);
   
   let text = "\n[HISTORICAL COMPARISON]\n";
   text += `Comparing ${currentStructureLabel} sessions (${matchQuality}):\n`;
-  text += `  Previous: "${similar.name}" (${similarDate}) - ${similarDist} km | ${similarPace}/km`;
+  text += `  Previous: "${similar.name}" (${similarDate}, ${similarLocation}) - ${similarDist} km | ${similarPaceStr}/km [${similarPace.label}]`;
   if (similarHR) text += ` | HR: ${similarHR}`;
+  if (!similarIsTreadmill && similarElev > 10) text += ` | +${similarElev}m`;
   text += "\n";
-  text += `  Current:  "${current.name}" - ${currentDistStr} km | ${currentPaceStr}/km`;
+  text += `  Current:  "${current.name}" (${currentLocation}) - ${currentDistStr} km | ${currentPaceStr}/km [${currentPace.label}]`;
   if (currentHR) text += ` | HR: ${currentHR}`;
+  if (!currentIsTreadmill && currentElev > 10) text += ` | +${currentElev}m`;
   text += "\n";
   
-  // Calculate pace difference (in seconds per km)
-  const currentPaceSec = current.average_speed > 0 ? 1000 / current.average_speed : 0;
-  const similarPaceSec = similar.average_speed > 0 ? 1000 / similar.average_speed : 0;
+  // Calculate pace difference using comparable (GAP-adjusted) paces
+  const currentPaceSec = currentPace.speed > 0 ? 1000 / currentPace.speed : 0;
+  const similarPaceSec = similarPace.speed > 0 ? 1000 / similarPace.speed : 0;
   const paceDiff = currentPaceSec - similarPaceSec; // positive = slower
   const paceAbsDiff = Math.abs(paceDiff);
   const paceChange = paceDiff < -1 
@@ -1023,18 +1075,22 @@ const findSimilarWorkout = (current: StravaActivity, history: StravaActivity[], 
       ? `${Math.round(paceAbsDiff)}s/km slower`
       : "Same pace";
   
-  text += `→ Pace: ${paceChange}`;
+  text += `→ ${currentPace.label}: ${paceChange}`;
   
   if (currentHR && similarHR) {
     const hrDiff = currentHR - similarHR;
     text += ` | HR: ${hrDiff >= 0 ? '+' : ''}${hrDiff} bpm`;
     
-    // Only give efficiency verdict if structure matches well
-    if (similarStructure === currentStructure) {
+    // Only give confident verdicts when comparison is fair
+    if (structureMatch && locationMatch) {
+      // Best case: same structure, same location type → high confidence verdict
       if (paceDiff < -1 && hrDiff <= 0) text += " ✅ (Faster + lower HR = IMPROVING)";
       else if (paceDiff < -1 && hrDiff > 3) text += " (Faster but higher HR = pushing harder)";
       else if (Math.abs(paceDiff) <= 2 && hrDiff < -3) text += " ✅ (Same pace, lower HR = aerobic improvement)";
       else if (paceDiff > 2 && hrDiff > 0) text += " ⚠️ (Slower + higher HR = possible fatigue)";
+    } else if (structureMatch && !locationMatch) {
+      // Cross-location comparison: note the caveat
+      text += ` (⚠️ cross-location: ${similarLocation} → ${currentLocation} - pace not directly comparable)`;
     } else {
       text += " (⚠️ different workout structure - compare with caution)";
     }
