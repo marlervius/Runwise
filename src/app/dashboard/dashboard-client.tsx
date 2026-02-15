@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -48,6 +48,7 @@ interface StravaGear {
 }
 
 interface StravaActivity {
+  id: number;
   name: string;
   start_date_local: string;
   distance: number;
@@ -1311,8 +1312,8 @@ type PromptMode = 'setup' | 'daily';
 export default function DashboardClient({ 
   activities, 
   athleteStats,
-  bestEfforts,
-  heartRateZones 
+  bestEfforts: initialBestEfforts,
+  heartRateZones: initialHeartRateZones 
 }: DashboardClientProps) {
   const [copied, setCopied] = useState(false);
   const [userProfile, setUserProfile] = useState<UserProfile>(DEFAULT_PROFILE);
@@ -1322,16 +1323,94 @@ export default function DashboardClient({
   const [isFirstTimeUser, setIsFirstTimeUser] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [selectedActivityIndex, setSelectedActivityIndex] = useState(0); // Which activity to analyze
+  const [loadingDetail, setLoadingDetail] = useState(false); // Loading detailed data
+
+  // Enriched activities: local copy with detailed data merged in on demand
+  const [enrichedActivities, setEnrichedActivities] = useState<StravaActivity[]>(activities);
+  // Per-activity zones and best efforts (keyed by activity id)
+  const [zonesMap, setZonesMap] = useState<Map<number, HeartRateZoneBucket[]>>(() => {
+    const map = new Map<number, HeartRateZoneBucket[]>();
+    if (activities.length > 0 && activities[0].id) {
+      map.set(activities[0].id, initialHeartRateZones);
+    }
+    return map;
+  });
+  const [bestEffortsMap, setBestEffortsMap] = useState<Map<number, BestEffort[]>>(() => {
+    const map = new Map<number, BestEffort[]>();
+    if (activities.length > 0 && activities[0].id) {
+      map.set(activities[0].id, initialBestEfforts);
+    }
+    return map;
+  });
 
   // Filter valid runs first
-  const validRuns = useMemo(() => filterValidRuns(activities), [activities]);
+  const validRuns = useMemo(() => filterValidRuns(enrichedActivities), [enrichedActivities]);
   
   // Get selected activity and history (all other activities for context)
   const currentRun = validRuns[selectedActivityIndex] || validRuns[0];
   const history = useMemo(() => {
-    // History is all activities except the selected one, maintaining order
     return validRuns.filter((_, index) => index !== selectedActivityIndex);
   }, [validRuns, selectedActivityIndex]);
+
+  // Get zones and bestEfforts for the currently selected activity
+  const heartRateZones = useMemo(() => {
+    if (!currentRun?.id) return initialHeartRateZones;
+    return zonesMap.get(currentRun.id) || [];
+  }, [currentRun, zonesMap, initialHeartRateZones]);
+
+  const bestEfforts = useMemo(() => {
+    if (!currentRun?.id) return initialBestEfforts;
+    return bestEffortsMap.get(currentRun.id) || [];
+  }, [currentRun, bestEffortsMap, initialBestEfforts]);
+
+  // Fetch detailed data for selected activity if not already enriched
+  const fetchActivityDetail = useCallback(async (activity: StravaActivity, activityIndex: number) => {
+    // Skip if already has detailed data (splits_metric present = enriched)
+    if (activity.splits_metric && activity.splits_metric.length > 0) return;
+    if (!activity.id) return;
+
+    setLoadingDetail(true);
+    try {
+      const res = await fetch(`/api/strava/activity/${activity.id}`);
+      if (!res.ok) {
+        console.error("[Enrich] Failed to fetch detail for activity", activity.id);
+        return;
+      }
+      const data = await res.json();
+
+      if (data.detailed) {
+        // Merge detailed data into the enriched activities array
+        setEnrichedActivities(prev => {
+          const updated = [...prev];
+          // Find the activity in the full list by id
+          const fullIndex = updated.findIndex(a => a.id === activity.id);
+          if (fullIndex >= 0) {
+            updated[fullIndex] = { ...updated[fullIndex], ...data.detailed };
+          }
+          return updated;
+        });
+      }
+
+      if (data.heartRateZones && data.heartRateZones.length > 0) {
+        setZonesMap(prev => new Map(prev).set(activity.id, data.heartRateZones));
+      }
+
+      if (data.bestEfforts && data.bestEfforts.length > 0) {
+        setBestEffortsMap(prev => new Map(prev).set(activity.id, data.bestEfforts));
+      }
+    } catch (err) {
+      console.error("[Enrich] Error fetching activity detail:", err);
+    } finally {
+      setLoadingDetail(false);
+    }
+  }, []);
+
+  // When user selects a different activity, fetch its detailed data
+  useEffect(() => {
+    if (currentRun && currentRun.id) {
+      fetchActivityDetail(currentRun, selectedActivityIndex);
+    }
+  }, [selectedActivityIndex, currentRun, fetchActivityDetail]);
   
   // Prepare chart data
   const chartData = useMemo(() => prepareChartData(validRuns), [validRuns]);
@@ -1350,7 +1429,6 @@ export default function DashboardClient({
     const hasProfile = hasStoredProfile();
     
     if (!hasProfile) {
-      // First-time user - show onboarding
       setIsFirstTimeUser(true);
       setIsSettingsOpen(true);
       setUserProfile(DEFAULT_PROFILE);
@@ -1362,7 +1440,7 @@ export default function DashboardClient({
     setIsLoaded(true);
   }, []);
 
-  // Generate prompts dynamically based on mode and RPE
+  // Generate prompts dynamically based on mode, RPE, and current data
   const systemPrompt = useMemo(() => {
     if (!currentRun) return "";
     return generateSystemPrompt(currentRun, history, userProfile, heartRateZones, bestEfforts, rpe);
@@ -1384,7 +1462,7 @@ export default function DashboardClient({
 
   const handleProfileSave = (newProfile: UserProfile) => {
     setUserProfile(newProfile);
-    setIsFirstTimeUser(false); // User has now completed onboarding
+    setIsFirstTimeUser(false);
   };
 
   // Calculate training load for display
@@ -1499,7 +1577,7 @@ export default function DashboardClient({
                     
                     return (
                       <button
-                        key={activity.start_date_local + index}
+                        key={activity.id || activity.start_date_local + index}
                         onClick={() => setSelectedActivityIndex(index)}
                         className={`flex-shrink-0 p-3 rounded-lg border transition-all duration-200 text-left min-w-[160px] ${
                           isSelected
@@ -1746,7 +1824,14 @@ export default function DashboardClient({
         <Card className="bg-slate-900/50 border-slate-800 shadow-2xl shadow-purple-900/10">
           <CardHeader className="space-y-4">
             <div className="flex flex-row items-center justify-between">
-              <CardTitle className="text-white">AI Coaching Prompt</CardTitle>
+              <CardTitle className="text-white flex items-center gap-2">
+                AI Coaching Prompt
+                {loadingDetail && (
+                  <span className="text-xs font-normal text-indigo-400 animate-pulse">
+                    Loading detailed data...
+                  </span>
+                )}
+              </CardTitle>
               <Button 
                 onClick={handleCopy}
                 className={`transition-all duration-300 ${copied ? 'bg-green-600 hover:bg-green-700' : 'bg-purple-600 hover:bg-purple-700'}`}
