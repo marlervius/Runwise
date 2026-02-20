@@ -22,6 +22,7 @@ export interface UserProfile {
   lactateThreshold: string;
   goal: string;
   injuryHistory: string;
+  aiPersonality?: string;
 }
 
 export const DEFAULT_PROFILE: UserProfile = {
@@ -30,6 +31,7 @@ export const DEFAULT_PROFILE: UserProfile = {
   lactateThreshold: "",
   goal: "",
   injuryHistory: "",
+  aiPersonality: "Supportive Coach",
 };
 
 const STORAGE_KEY = "runprompt-user-profile";
@@ -202,6 +204,21 @@ export function SettingsDialog({
                 className="bg-slate-800 border-slate-600 text-white resize-none"
                 rows={3}
               />
+            </div>
+            
+            <div className="space-y-2">
+              <Label htmlFor="aiPersonality" className="text-slate-300">AI Coach Personality</Label>
+              <select
+                id="aiPersonality"
+                value={formData.aiPersonality || "Supportive Coach"}
+                onChange={(e) => setFormData({ ...formData, aiPersonality: e.target.value })}
+                className="flex h-10 w-full rounded-md border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-white ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <option value="Supportive Coach">Supportive & Encouraging</option>
+                <option value="Strict Drill Sergeant">Strict Drill Sergeant</option>
+                <option value="Data-Driven Physiologist">Data-Driven Physiologist</option>
+                <option value="Elite Pro Runner">Elite Pro Runner</option>
+              </select>
             </div>
           </div>
         </div>

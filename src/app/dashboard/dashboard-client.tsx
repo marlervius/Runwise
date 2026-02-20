@@ -25,94 +25,32 @@ import {
   Legend,
 } from "recharts";
 
-interface StravaLap {
-  id: number;
-  name: string;
-  elapsed_time: number;
-  moving_time: number;
-  distance: number;
-  average_speed: number;
-  max_speed: number;
-  average_heartrate?: number;
-  max_heartrate?: number;
-  lap_index: number;
-  total_elevation_gain?: number;
-  split?: number; // index
-}
+import { 
+  StravaActivity, 
+  HeartRateZoneBucket, 
+  BestEffort, 
+  AthleteStats, 
+  ChartDataPoint 
+} from "@/types/strava";
 
-interface StravaGear {
-  id: string;
-  name: string;
-  primary: boolean;
-  distance: number;
-}
+import { 
+  filterValidRuns, 
+  calculateTrainingLoad 
+} from "@/lib/metrics";
 
-interface StravaActivity {
-  id: number;
-  name: string;
-  start_date_local: string;
-  distance: number;
-  moving_time: number;
-  total_elevation_gain: number;
-  average_speed: number;
-  max_speed: number;
-  average_heartrate?: number;
-  max_heartrate?: number;
-  average_cadence?: number;
-  suffer_score?: number;
-  description?: string;
-  splits_metric?: any[];
-  type?: string;
-  sport_type?: string;
-  best_efforts?: BestEffort[];
-  trainer?: boolean;
-  workout_type?: number;
-  // New fields
-  average_grade_adjusted_speed?: number; // GAP
-  gear_id?: string;
-  gear?: StravaGear;
-  laps?: StravaLap[];
-}
+import { 
+  generateSystemPrompt, 
+  generateUpdatePrompt, 
+  getKeyPRs,
+  formatDurationLong,
+  formatPace,
+  formatShortDate,
+  ZONE_COLORS,
+  RPE_LABELS
+} from "@/lib/prompt-generator";
 
-interface BestEffort {
-  id: number;
-  name: string;
-  elapsed_time: number;
-  moving_time: number;
-  start_date: string;
-  start_date_local: string;
-  distance: number;
-  pr_rank?: number;
-}
-
-interface HeartRateZoneBucket {
-  min: number;
-  max: number;
-  time: number;
-}
-
-interface AthleteStats {
-  all_run_totals: {
-    count: number;
-    distance: number;
-    moving_time: number;
-  };
-  ytd_run_totals: {
-    count: number;
-    distance: number;
-    moving_time: number;
-  };
-}
-
-interface ChartDataPoint {
-  date: string;
-  fullDate: string;
-  distance: number;
-  hr: number | null;
-  pace: string;
-  isTreadmill: boolean;
-  name: string;
-}
+import { getCachedActivityDetail, setCachedActivityDetail } from "@/lib/cache";
+import { getHistoricalWeather, WeatherData } from "@/lib/weather";
 
 interface DashboardClientProps {
   activities: StravaActivity[];
@@ -120,272 +58,6 @@ interface DashboardClientProps {
   bestEfforts: BestEffort[];
   heartRateZones: HeartRateZoneBucket[];
 }
-
-// Zone colors for visualization
-const ZONE_COLORS = [
-  { bg: 'bg-gray-500', text: 'text-gray-300', label: 'Z1 Recovery' },
-  { bg: 'bg-blue-500', text: 'text-blue-300', label: 'Z2 Endurance' },
-  { bg: 'bg-green-500', text: 'text-green-300', label: 'Z3 Tempo' },
-  { bg: 'bg-yellow-500', text: 'text-yellow-300', label: 'Z4 Threshold' },
-  { bg: 'bg-red-500', text: 'text-red-300', label: 'Z5 VO2max' },
-];
-
-// RPE (Rate of Perceived Exertion) labels
-const RPE_LABELS: Record<number, { label: string; color: string }> = {
-  1: { label: 'Very Light', color: 'text-gray-400' },
-  2: { label: 'Light', color: 'text-gray-400' },
-  3: { label: 'Light', color: 'text-blue-400' },
-  4: { label: 'Moderate', color: 'text-blue-400' },
-  5: { label: 'Moderate', color: 'text-green-400' },
-  6: { label: 'Somewhat Hard', color: 'text-green-400' },
-  7: { label: 'Hard', color: 'text-yellow-400' },
-  8: { label: 'Hard', color: 'text-orange-400' },
-  9: { label: 'Very Hard', color: 'text-red-400' },
-  10: { label: 'Maximum', color: 'text-red-500' },
-};
-
-// Classify activity type based on avg HR % of maxHR (fallback when zone data unavailable)
-// Thresholds calibrated so that easy runs (e.g. HR 131 at maxHR 185 = 70.8%) are NOT mislabeled as Tempo
-const classifyActivityType = (activity: StravaActivity, maxHR: number): string => {
-  // Explicit Strava workout types take priority
-  if (activity.workout_type === 1) return "Race";
-  if (activity.workout_type === 3) return "Workout";
-
-  // Need HR data and maxHR to classify
-  if (!activity.average_heartrate || !maxHR || maxHR === 0) {
-    return "Easy"; // fallback when no HR data available
-  }
-
-  const hrPercent = (activity.average_heartrate / maxHR) * 100;
-
-  // Widened Easy zone to prevent mislabeling - most runners are in Z1-Z2 up to ~76% maxHR
-  if (hrPercent < 65) return "Recovery";
-  if (hrPercent < 76) return "Easy / Base";
-  if (hrPercent < 85) return "Tempo";
-  if (hrPercent < 92) return "Threshold";
-  return "VO2max";
-};
-
-// Classify using HR zone TIME DISTRIBUTION (more accurate than avg HR)
-// This uses the actual time spent in each zone, avoiding the "easy run labeled Tempo" problem
-const classifyByZones = (zones: HeartRateZoneBucket[]): { classification: string; breakdown: string } => {
-  const totalTime = zones.reduce((sum, z) => sum + z.time, 0);
-  if (totalTime === 0) return { classification: "Unknown", breakdown: "" };
-  
-  const pct = zones.map(z => (z.time / totalTime) * 100);
-  const easyPct = (pct[0] || 0) + (pct[1] || 0);   // Z1 + Z2
-  const tempoPct = pct[2] || 0;                       // Z3
-  const hardPct = (pct[3] || 0) + (pct[4] || 0);     // Z4 + Z5
-
-  const breakdown = `Z1-2: ${easyPct.toFixed(0)}% | Z3: ${tempoPct.toFixed(0)}% | Z4-5: ${hardPct.toFixed(0)}%`;
-
-  if (easyPct >= 70) return { classification: "Easy / Base", breakdown };
-  if (easyPct >= 55 && hardPct < 10) return { classification: "Easy / Aerobic", breakdown };
-  if (hardPct >= 30) return { classification: "Threshold / Intervals", breakdown };
-  if (tempoPct >= 30) return { classification: "Tempo", breakdown };
-  if (easyPct >= 45 && tempoPct >= 20) return { classification: "Moderate / Steady State", breakdown };
-  return { classification: "Mixed Intensity", breakdown };
-};
-
-// Detect running type based on workout_type, laps, and split variance
-const detectRunningType = (activity: StravaActivity): { type: string; detected: boolean; hasStructure: boolean } => {
-  // Check explicit workout types first
-  if (activity.workout_type === 1) return { type: 'Race', detected: false, hasStructure: false };
-  if (activity.workout_type === 2) return { type: 'Long Run', detected: false, hasStructure: false };
-  if (activity.workout_type === 3) return { type: 'Intervals / Structured', detected: false, hasStructure: true };
-  
-  // Check if laps exist and have significant pace variance (manual lap presses = structured workout)
-  if (activity.laps && activity.laps.length >= 2) {
-    const lapPaces = activity.laps
-      .filter(lap => lap.distance > 100) // Only consider substantial laps
-      .map(lap => lap.average_speed > 0 ? 1000 / lap.average_speed : 0);
-    
-    if (lapPaces.length >= 2) {
-      const avgPace = lapPaces.reduce((a, b) => a + b, 0) / lapPaces.length;
-      const variance = lapPaces.reduce((sum, p) => sum + Math.pow(p - avgPace, 2), 0) / lapPaces.length;
-      const stdDev = Math.sqrt(variance);
-      
-      // If std deviation > 20 seconds in laps, it's a structured workout
-      if (stdDev > 20) {
-        return { type: 'Intervals / Structured', detected: true, hasStructure: true };
-      }
-    }
-    
-    // Multiple laps with similar paces = tempo or threshold
-    if (activity.laps.length >= 3) {
-      return { type: 'Structured Session', detected: true, hasStructure: true };
-    }
-  }
-  
-  // Fallback: Check pace variance in splits_metric
-  if (activity.splits_metric && activity.splits_metric.length >= 3) {
-    const paces = activity.splits_metric
-      .filter((s: any) => s.distance > 500)
-      .map((s: any) => s.average_speed > 0 ? 1000 / s.average_speed : 0);
-    
-    if (paces.length >= 3) {
-      const avgPace = paces.reduce((a: number, b: number) => a + b, 0) / paces.length;
-      const variance = paces.reduce((sum: number, p: number) => sum + Math.pow(p - avgPace, 2), 0) / paces.length;
-      const stdDev = Math.sqrt(variance);
-      
-      if (stdDev > 30) {
-        return { type: 'Fartlek/Variable', detected: true, hasStructure: false };
-      }
-    }
-  }
-  
-  // Check if it's a recovery run (very slow pace, low HR)
-  if (activity.average_heartrate && activity.average_heartrate < 140) {
-    return { type: 'Recovery Run', detected: true, hasStructure: false };
-  }
-  
-  return { type: 'Steady Run', detected: true, hasStructure: false };
-};
-
-// Convert raw speed to Grade Adjusted Speed using elevation difference per split
-// Formula: ~12 sec/km per 1% uphill grade, ~8 sec/km benefit per 1% downhill (capped)
-const getGradeAdjustedSpeed = (split: any): number => {
-  const rawSpeed = split.average_speed; // m/s
-  if (!rawSpeed || rawSpeed <= 0) return 0;
-
-  // If no elevation data, return raw speed (no adjustment possible)
-  if (split.elevation_difference === undefined || split.elevation_difference === null || split.distance <= 0) {
-    return rawSpeed;
-  }
-
-  const gradePercent = (split.elevation_difference / split.distance) * 100;
-  const rawPaceSecPerKm = 1000 / rawSpeed;
-
-  // Adjustment: uphill adds time (harder), downhill subtracts (easier, but capped benefit)
-  let adjustment: number;
-  if (gradePercent >= 0) {
-    adjustment = gradePercent * 12; // +12 sec/km per 1% uphill
-  } else {
-    adjustment = gradePercent * 8;  // -8 sec/km per 1% downhill (less benefit going down)
-  }
-
-  const gapPaceSecPerKm = rawPaceSecPerKm - adjustment; // subtract because uphill adjustment is positive
-  if (gapPaceSecPerKm <= 0) return rawSpeed; // sanity check
-
-  return 1000 / gapPaceSecPerKm; // convert back to m/s
-};
-
-// Calculate Aerobic Decoupling (Cardiac Drift) - ELEVATION ADJUSTED
-// Uses Grade Adjusted Pace (GAP) so that out-and-back courses with elevation
-// don't produce false drift readings (e.g., downhill first half, uphill return)
-const calculateDecoupling = (splits: any[]): { percentage: number; status: string; elevationAdjusted: boolean } | null => {
-  if (!splits || splits.length < 4) return null;
-  
-  // Filter valid splits with both pace and HR data
-  const validSplits = splits.filter((s: any) => 
-    s.distance > 500 && s.average_speed > 0 && s.average_heartrate > 0
-  );
-  
-  if (validSplits.length < 4) return null;
-
-  // Check if elevation data is available for adjustment
-  const hasElevation = validSplits.some((s: any) => 
-    s.elevation_difference !== undefined && s.elevation_difference !== null
-  );
-  
-  const midpoint = Math.floor(validSplits.length / 2);
-  const firstHalf = validSplits.slice(0, midpoint);
-  const secondHalf = validSplits.slice(midpoint);
-  
-  // Calculate Efficiency Factor (EF) = GAP_Speed / HR for each half
-  // Using GAP accounts for terrain so uphill return legs don't inflate drift
-  const calcEF = (splits: any[]) => {
-    const totalSpeed = splits.reduce((sum: number, s: any) => sum + getGradeAdjustedSpeed(s), 0);
-    const totalHR = splits.reduce((sum: number, s: any) => sum + s.average_heartrate, 0);
-    return (totalSpeed / splits.length) / (totalHR / splits.length);
-  };
-  
-  const ef1 = calcEF(firstHalf);
-  const ef2 = calcEF(secondHalf);
-  
-  // Decoupling = (EF1 - EF2) / EF1 * 100
-  const decoupling = ((ef1 - ef2) / ef1) * 100;
-  
-  let status: string;
-  if (decoupling < 3) status = 'Excellent (aerobic)';
-  else if (decoupling < 5) status = 'Good';
-  else if (decoupling < 8) status = 'Moderate Drift';
-  else status = 'High Drift (threshold+)';
-  
-  return { percentage: decoupling, status, elevationAdjusted: hasElevation };
-};
-
-// Filter valid runs
-const filterValidRuns = (activities: StravaActivity[]): StravaActivity[] => {
-  return activities.filter(activity => {
-    const hasMinDistance = activity.distance > 500;
-    const hasMinSpeed = activity.average_speed > 0.83;
-    const isRunType = !activity.type || 
-      activity.type.toLowerCase().includes('run') || 
-      activity.sport_type?.toLowerCase().includes('run');
-    return hasMinDistance && hasMinSpeed && isRunType;
-  });
-};
-
-// Helper functions for formatting
-const formatDuration = (seconds: number): string => {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  return `${h > 0 ? h + ':' : ''}${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-};
-
-const formatDurationLong = (seconds: number): string => {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
-  if (h > 0) return `${h}h ${m}m ${s}s`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
-};
-
-const formatPace = (speedMs: number): string => {
-  if (speedMs === 0) return "0:00";
-  const secondsPerKm = 1000 / speedMs;
-  const m = Math.floor(secondsPerKm / 60);
-  const s = Math.floor(secondsPerKm % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
-};
-
-const formatShortDate = (dateStr: string): string => {
-  const date = new Date(dateStr);
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-};
-
-const formatPRDate = (dateStr: string): string => {
-  const date = new Date(dateStr);
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-};
-
-// Get workout type label
-const getWorkoutTypeLabel = (activity: StravaActivity): string => {
-  if (activity.trainer) {
-    return "🏠 Treadmill";
-  }
-  
-  switch (activity.workout_type) {
-    case 1: return "🏁 Race";
-    case 2: return "📏 Long Run";
-    case 3: return "💪 Workout";
-    default: return "🏃 Outdoor";
-  }
-};
-
-// Get short workout indicator
-const getWorkoutIndicator = (activity: StravaActivity): string => {
-  if (activity.trainer) return "🏠";
-  switch (activity.workout_type) {
-    case 1: return "🏁";
-    case 2: return "📏";
-    case 3: return "💪";
-    default: return "🌳";
-  }
-};
 
 // Prepare data for the chart
 const prepareChartData = (activities: StravaActivity[]): ChartDataPoint[] => {
@@ -400,945 +72,6 @@ const prepareChartData = (activities: StravaActivity[]): ChartDataPoint[] => {
     name: activity.name,
     isTreadmill: activity.trainer || false,
   }));
-};
-
-// Calculate training load for last 7 days
-const calculateTrainingLoad = (activities: StravaActivity[]) => {
-  const now = new Date();
-  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  
-  let totalDistance = 0;
-  let totalTime = 0;
-  let sessionsCount = 0;
-  
-  activities.forEach(activity => {
-    const activityDate = new Date(activity.start_date_local);
-    if (activityDate >= sevenDaysAgo) {
-      totalDistance += activity.distance;
-      totalTime += activity.moving_time;
-      sessionsCount++;
-    }
-  });
-  
-  return {
-    totalDistanceKm: totalDistance / 1000,
-    totalHours: totalTime / 3600,
-    sessionsLast7Days: sessionsCount
-  };
-};
-
-// Filter and format PRs for key distances
-const getKeyPRs = (bestEfforts: BestEffort[]) => {
-  const keyDistances = ['5k', '10k', 'Half-Marathon', 'Marathon'];
-  const prs: { name: string; time: string; date: string; isPR: boolean }[] = [];
-  
-  keyDistances.forEach(distName => {
-    const effort = bestEfforts.find(e => 
-      e.name.toLowerCase() === distName.toLowerCase() ||
-      e.name.toLowerCase().replace('-', '') === distName.toLowerCase().replace('-', '')
-    );
-    if (effort) {
-      prs.push({
-        name: distName,
-        time: formatDuration(effort.elapsed_time),
-        date: formatPRDate(effort.start_date_local),
-        isPR: effort.pr_rank === 1,
-      });
-    }
-  });
-  
-  return prs;
-};
-
-// Format zones for display and prompt
-const formatZonesForPrompt = (zones: HeartRateZoneBucket[]): string => {
-  if (!zones || zones.length === 0) return "Heart Rate Zone data not available.";
-  
-  let text = "";
-  zones.forEach((zone, index) => {
-    const label = ZONE_COLORS[index]?.label || `Zone ${index + 1}`;
-    const timeStr = formatDurationLong(zone.time);
-    const percentage = zones.reduce((sum, z) => sum + z.time, 0) > 0 
-      ? ((zone.time / zones.reduce((sum, z) => sum + z.time, 0)) * 100).toFixed(0)
-      : 0;
-    text += `- ${label} (${zone.min}-${zone.max} bpm): ${timeStr} (${percentage}%)\n`;
-  });
-  
-  return text;
-};
-
-// Generate history table (includes athlete notes/descriptions when available)
-const generateHistoryTable = (history: StravaActivity[], maxHR: number): string => {
-  if (history.length === 0) return "No previous activities available.";
-
-  let table = "| Date | Location | Type | Dist (km) | Pace | Avg HR | Notes |\n";
-  table += "|------|----------|------|-----------|------|--------|-------|\n";
-
-  history.forEach(activity => {
-    const date = formatShortDate(activity.start_date_local);
-    const location = activity.trainer ? "Treadmill" : "Outdoor";
-    const type = classifyActivityType(activity, maxHR);
-    const dist = (activity.distance / 1000).toFixed(1);
-    const pace = formatPace(activity.average_speed);
-    const hr = activity.average_heartrate ? Math.round(activity.average_heartrate).toString() : "-";
-    // Truncate description to keep table readable, strip newlines
-    const notes = activity.description && activity.description.trim().length > 0
-      ? activity.description.trim().replace(/[\n\r]+/g, ' ').substring(0, 60) + (activity.description.trim().length > 60 ? '...' : '')
-      : "-";
-
-    table += `| ${date} | ${location} | ${type} | ${dist} | ${pace} | ${hr} | ${notes} |\n`;
-  });
-
-  return table;
-};
-
-// Guess lap type based on pace and HR patterns
-const guessLapType = (lap: StravaLap, avgSessionPace: number): string => {
-  const lapPaceSeconds = lap.average_speed > 0 ? 1000 / lap.average_speed : 0;
-  const paceRatio = lapPaceSeconds / avgSessionPace;
-  
-  // Check lap name first (Strava sometimes labels them)
-  if (lap.name) {
-    const nameLower = lap.name.toLowerCase();
-    if (nameLower.includes('warm') || nameLower.includes('wu')) return '🔥 Warmup';
-    if (nameLower.includes('cool') || nameLower.includes('cd')) return '❄️ Cooldown';
-    if (nameLower.includes('rest') || nameLower.includes('recovery')) return '😮‍💨 Recovery';
-    if (nameLower.includes('interval') || nameLower.includes('rep')) return '⚡ Interval';
-  }
-  
-  // Heuristic based on pace relative to session average
-  if (paceRatio > 1.15) return '😮‍💨 Recovery';
-  if (paceRatio < 0.92) return '⚡ Hard';
-  return ''; // Normal pace, no label
-};
-
-// Format laps for structured workouts (manual lap button presses)
-// Enhanced: identifies rest laps, shows recovery HR, GAP estimates
-// Treadmill mode: GPS pace/distance is unreliable, show only time + HR
-const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number, isTreadmill: boolean = false): string => {
-  if (!laps || laps.length === 0) return "";
-  
-  // Calculate session average pace in seconds/km
-  const avgSessionPace = sessionAvgSpeed > 0 ? 1000 / sessionAvgSpeed : 0;
-  
-  let text = "\n[WORKOUT STRUCTURE (Manual Laps)]\n";
-  if (isTreadmill) {
-    text += "⚠️ TREADMILL: GPS pace/distance per lap is UNRELIABLE. Use activity-level pace (from treadmill calibration) as truth.\n";
-    text += "   Lap HR data and time are still accurate and useful for analysis.\n";
-  }
-  text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
-  
-  let lastWorkLapMaxHR: number | null = null;
-  
-  laps.forEach((lap, index) => {
-    const lapPace = formatPace(lap.average_speed);
-    const lapTime = formatDuration(lap.elapsed_time);
-    const lapDist = (lap.distance / 1000).toFixed(2);
-    const lapType = isTreadmill ? '' : guessLapType(lap, avgSessionPace);
-    const isRestLap = lapType.includes('Recovery');
-    const isWarmCool = lapType.includes('Warmup') || lapType.includes('Cooldown');
-    
-    const hrInfo = lap.average_heartrate 
-      ? `HR: ${Math.round(lap.average_heartrate)} | Max: ${Math.round(lap.max_heartrate || 0)}`
-      : "HR: -";
-    
-    if (isTreadmill) {
-      // TREADMILL MODE: show time + HR only (these are reliable)
-      // Detect rest laps by HR drop instead of pace (since GPS pace is junk)
-      let recoveryInfo = "";
-      if (lastWorkLapMaxHR && lap.average_heartrate) {
-        const hrDrop = lastWorkLapMaxHR - lap.average_heartrate;
-        // On treadmill, a significant HR drop between laps indicates rest
-        if (hrDrop > 10) {
-          recoveryInfo = ` | HR Recovery: -${Math.round(hrDrop)} bpm (${Math.round(lastWorkLapMaxHR)} → ${Math.round(lap.average_heartrate)}) 😮‍💨 Rest`;
-        }
-      }
-      
-      // Standing rest detection
-      let restNote = "";
-      if (lap.elapsed_time > 0) {
-        const standingTime = lap.elapsed_time - lap.moving_time;
-        if (standingTime > 10) {
-          restNote = ` | Standing rest: ${formatDuration(standingTime)}`;
-        }
-      }
-      
-      text += `Lap ${index + 1}: ${lapTime} | ${hrInfo}${recoveryInfo}${restNote}\n`;
-      
-      // Track work lap HR: use HR level instead of pace for treadmill
-      if (lap.max_heartrate && lap.average_heartrate) {
-        const isLikelyWork = !lastWorkLapMaxHR || 
-          (lap.average_heartrate > (lastWorkLapMaxHR - 15)); // HR didn't drop significantly
-        if (isLikelyWork) {
-          lastWorkLapMaxHR = lap.max_heartrate;
-        }
-      }
-    } else {
-      // OUTDOOR MODE: full data including pace, distance, elevation, GAP
-      const elevInfo = lap.total_elevation_gain && lap.total_elevation_gain > 5 
-        ? ` | +${Math.round(lap.total_elevation_gain)}m` 
-        : "";
-      
-      // GAP estimate for any lap with elevation gain > 3m
-      let gapInfo = "";
-      if (lap.total_elevation_gain && lap.total_elevation_gain > 3 && lap.distance > 100 && lap.average_speed > 0) {
-        const gradePercent = (lap.total_elevation_gain / lap.distance) * 100;
-        const actualPaceSeconds = 1000 / lap.average_speed;
-        const gapAdjustment = gradePercent * 12;
-        const gapSeconds = actualPaceSeconds - gapAdjustment;
-        if (gapSeconds > 120 && gapAdjustment > 2) {
-          const gapMin = Math.floor(gapSeconds / 60);
-          const gapSec = Math.floor(gapSeconds % 60);
-          gapInfo = ` | GAP: ~${gapMin}:${gapSec.toString().padStart(2, '0')}/km`;
-        }
-      }
-      
-      // Recovery info: show on ANY lap that follows a work lap and is slower
-      const isSlowerThanWork = lastWorkLapMaxHR !== null && (isRestLap || (
-        !isWarmCool && lap.average_speed > 0 && avgSessionPace > 0 &&
-        (1000 / lap.average_speed) > avgSessionPace * 1.05
-      ));
-      
-      let recoveryInfo = "";
-      if (isSlowerThanWork && lastWorkLapMaxHR && lap.average_heartrate) {
-        const hrDrop = lastWorkLapMaxHR - lap.average_heartrate;
-        if (hrDrop > 0) {
-          recoveryInfo = ` | HR Recovery: -${Math.round(hrDrop)} bpm from prev peak (${Math.round(lastWorkLapMaxHR)} → ${Math.round(lap.average_heartrate)})`;
-        }
-      }
-
-      // Standing rest detection
-      let restNote = "";
-      if ((isRestLap || isSlowerThanWork) && lap.elapsed_time > 0) {
-        const standingTime = lap.elapsed_time - lap.moving_time;
-        if (standingTime > 10) {
-          restNote = ` | Standing rest: ${formatDuration(standingTime)}`;
-        }
-      }
-      
-      text += `Lap ${index + 1}: ${lapTime} | ${lapDist} km | ${lapPace}/km | ${hrInfo}${elevInfo}${gapInfo}${recoveryInfo}${restNote}`;
-      if (lapType) text += ` ${lapType}`;
-      text += "\n";
-      
-      // Track work lap HR: pace-based detection for outdoor
-      const isWorkLap = !isRestLap && !isWarmCool && lap.average_speed > 0 &&
-        (1000 / lap.average_speed) < avgSessionPace * 0.95 && lap.max_heartrate;
-      if (isWorkLap) {
-        lastWorkLapMaxHR = lap.max_heartrate!;
-      }
-    }
-  });
-  
-  return text;
-};
-
-// Format splits for steady/unstructured runs
-const formatSplits = (splits: any[]): string => {
-  if (!splits || splits.length === 0) return "";
-  
-  let text = "\n[KM SPLITS (Auto)]\n";
-  splits.forEach((split: any, index: number) => {
-    if (split.distance < 100) return;
-    const splitPace = formatPace(split.average_speed);
-    const splitHr = split.average_heartrate ? `HR: ${Math.round(split.average_heartrate)}` : "";
-    text += `Km ${index + 1}: ${formatDuration(split.elapsed_time)} | ${splitPace} | ${splitHr}\n`;
-  });
-  return text;
-};
-
-// Calculate HR drift across work laps in structured workouts
-// Treadmill mode: identify work laps by HR level instead of pace (GPS unreliable)
-const calculateWorkLapHRDrift = (laps: StravaLap[], sessionAvgSpeed: number, isTreadmill: boolean = false): string => {
-  if (!laps || laps.length < 3) return "";
-  
-  const avgSessionPace = sessionAvgSpeed > 0 ? 1000 / sessionAvgSpeed : 0;
-  
-  let workLaps: StravaLap[];
-  
-  if (isTreadmill) {
-    // TREADMILL: identify work laps by HR - find laps with higher-than-average HR
-    const lapsWithHR = laps.filter(l => l.average_heartrate && l.average_heartrate > 0);
-    if (lapsWithHR.length < 3) return "";
-    const avgHR = lapsWithHR.reduce((sum, l) => sum + l.average_heartrate!, 0) / lapsWithHR.length;
-    // Work laps have HR above the session average (hard efforts)
-    workLaps = lapsWithHR.filter(lap => lap.average_heartrate! > avgHR + 3);
-  } else {
-    // OUTDOOR: identify work laps by pace (faster than session average)
-    workLaps = laps.filter(lap => {
-      if (!lap.average_heartrate || lap.average_heartrate === 0) return false;
-      if (lap.distance < 200) return false;
-      const lapPaceSeconds = lap.average_speed > 0 ? 1000 / lap.average_speed : 0;
-      const paceRatio = lapPaceSeconds / avgSessionPace;
-      return paceRatio < 0.95;
-    });
-  }
-  
-  if (workLaps.length < 2) return "";
-  
-  let text = "\n[WORK LAP HR PROGRESSION]\n";
-  if (isTreadmill) {
-    text += "(Work laps identified by HR level - GPS pace unreliable on treadmill)\n";
-  }
-  
-  workLaps.forEach((lap, index) => {
-    if (isTreadmill) {
-      text += `  Rep ${index + 1}: ${formatDuration(lap.elapsed_time)} | Avg HR: ${Math.round(lap.average_heartrate!)}`;
-    } else {
-      const pace = formatPace(lap.average_speed);
-      text += `  Rep ${index + 1}: ${pace}/km | Avg HR: ${Math.round(lap.average_heartrate!)}`;
-    }
-    if (lap.max_heartrate) text += ` | Max: ${Math.round(lap.max_heartrate)}`;
-    if (index > 0) {
-      const delta = Math.round(lap.average_heartrate! - workLaps[index - 1].average_heartrate!);
-      text += ` (${delta >= 0 ? '+' : ''}${delta})`;
-    }
-    text += "\n";
-  });
-  
-  const firstHR = workLaps[0].average_heartrate!;
-  const lastHR = workLaps[workLaps.length - 1].average_heartrate!;
-  const totalDrift = Math.round(lastHR - firstHR);
-  
-  text += `→ Total drift across ${workLaps.length} work reps: ${totalDrift >= 0 ? '+' : ''}${totalDrift} bpm`;
-  if (Math.abs(totalDrift) <= 2) text += " (Stable - excellent threshold endurance)";
-  else if (totalDrift > 5) text += " (Significant drift - possible fatigue/overreaching)";
-  else if (totalDrift > 3) text += " (Moderate drift - monitor closely)";
-  else if (totalDrift < -2) text += " (Negative drift - still warming up or conservative start)";
-  text += "\n";
-  
-  return text;
-};
-
-// Helper: get Monday of the week for a given date (ISO week)
-const getWeekStartMonday = (date: Date): Date => {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  const day = d.getDay();
-  const diff = d.getDate() - day + (day === 0 ? -6 : 1); // Adjust to Monday
-  return new Date(d.setDate(diff));
-};
-
-interface WeeklyVolume {
-  weekStart: string;
-  weekLabel: string;
-  km: number;
-  hours: number;
-  sessions: number;
-  elevationGain: number;
-}
-
-// Calculate weekly training volumes for the last 4-6 weeks
-const calculateWeeklyVolumes = (activities: StravaActivity[]): WeeklyVolume[] => {
-  if (activities.length === 0) return [];
-  
-  const weekMap = new Map<string, WeeklyVolume>();
-  
-  activities.forEach(activity => {
-    const date = new Date(activity.start_date_local);
-    const weekStart = getWeekStartMonday(date);
-    const key = weekStart.toISOString().split('T')[0];
-    
-    const existing = weekMap.get(key) || {
-      weekStart: key,
-      weekLabel: '',
-      km: 0,
-      hours: 0,
-      sessions: 0,
-      elevationGain: 0
-    };
-    existing.km += activity.distance / 1000;
-    existing.hours += activity.moving_time / 3600;
-    existing.sessions += 1;
-    existing.elevationGain += activity.total_elevation_gain || 0;
-    weekMap.set(key, existing);
-  });
-  
-  const now = new Date();
-  const currentWeekStart = getWeekStartMonday(now);
-  
-  return Array.from(weekMap.values())
-    .sort((a, b) => b.weekStart.localeCompare(a.weekStart))
-    .slice(0, 6)
-    .map(week => {
-      const weekDate = new Date(week.weekStart);
-      const weeksAgo = Math.round(
-        (currentWeekStart.getTime() - weekDate.getTime()) / (7 * 24 * 60 * 60 * 1000)
-      );
-      
-      if (weeksAgo === 0) week.weekLabel = 'This week';
-      else if (weeksAgo === 1) week.weekLabel = 'Last week';
-      else week.weekLabel = `${weeksAgo}w ago`;
-      
-      return week;
-    });
-};
-
-// Format weekly volumes as a Markdown table for the prompt
-const formatWeeklyVolumesTable = (volumes: WeeklyVolume[]): string => {
-  if (volumes.length === 0) return "Not enough data for weekly breakdown.";
-  
-  let table = "| Week | Km | Hours | Sessions | Elev (m) |\n";
-  table += "|------|------|-------|----------|----------|\n";
-  
-  volumes.forEach(w => {
-    table += `| ${w.weekLabel} | ${w.km.toFixed(1)} | ${w.hours.toFixed(1)} | ${w.sessions} | +${Math.round(w.elevationGain)} |\n`;
-  });
-  
-  // Trend indicators: week-over-week AND vs 4-week rolling average
-  if (volumes.length >= 2) {
-    const current = volumes[0];
-    const previous = volumes[1];
-    
-    // Week-over-week change
-    if (previous.km > 0) {
-      const wowChange = ((current.km - previous.km) / previous.km * 100);
-      const wowDir = wowChange > 0 ? '↑' : wowChange < 0 ? '↓' : '→';
-      table += `\nWeek-over-week: ${wowDir} ${Math.abs(wowChange).toFixed(0)}% (${previous.km.toFixed(1)} → ${current.km.toFixed(1)} km)`;
-    }
-    
-    // 4-week rolling average comparison (more meaningful than single week)
-    if (volumes.length >= 3) {
-      const avgWeeks = volumes.slice(1, Math.min(5, volumes.length)); // weeks 2-5 (excluding current)
-      const rollingAvg = avgWeeks.reduce((sum, w) => sum + w.km, 0) / avgWeeks.length;
-      
-      if (rollingAvg > 0) {
-        const vsAvgChange = ((current.km - rollingAvg) / rollingAvg * 100);
-        const vsAvgDir = vsAvgChange > 0 ? '↑' : vsAvgChange < 0 ? '↓' : '→';
-        table += `\nVs ${avgWeeks.length}-week avg (${rollingAvg.toFixed(1)} km): ${vsAvgDir} ${Math.abs(vsAvgChange).toFixed(0)}%`;
-        
-        if (vsAvgChange > 10) {
-          table += " ⚠️ (>10% above rolling average)";
-        } else if (vsAvgChange <= 10 && vsAvgChange > 0) {
-          table += " ✅ (safe progression)";
-        }
-      }
-    }
-  }
-  
-  return table;
-};
-
-interface ConsistencyMetrics {
-  totalActivities: number;
-  weeksSpan: number;
-  avgSessionsPerWeek: number;
-  longestActiveStreak: number;
-  longestRestStreak: number;
-  restDaysLast28: number;
-  activeDaysLast28: number;
-  sessionsPerWeekLast4: number[];
-}
-
-// Calculate training consistency metrics
-const calculateConsistencyMetrics = (activities: StravaActivity[]): ConsistencyMetrics => {
-  const empty: ConsistencyMetrics = {
-    totalActivities: 0, weeksSpan: 0, avgSessionsPerWeek: 0,
-    longestActiveStreak: 0, longestRestStreak: 0,
-    restDaysLast28: 28, activeDaysLast28: 0, sessionsPerWeekLast4: []
-  };
-  
-  if (activities.length === 0) return empty;
-  
-  // Get unique activity dates
-  const activityDays = new Set<string>();
-  activities.forEach(a => {
-    const day = new Date(a.start_date_local).toISOString().split('T')[0];
-    activityDays.add(day);
-  });
-  
-  const sortedDates = [...activityDays].sort();
-  const firstDate = new Date(sortedDates[0]);
-  const lastDate = new Date(sortedDates[sortedDates.length - 1]);
-  const daysSpan = Math.max(1, Math.ceil((lastDate.getTime() - firstDate.getTime()) / (24 * 60 * 60 * 1000)));
-  const weeksSpan = Math.max(1, Math.ceil(daysSpan / 7));
-  
-  // Calculate streaks
-  const allDates: string[] = [];
-  const current = new Date(firstDate);
-  while (current <= lastDate) {
-    allDates.push(current.toISOString().split('T')[0]);
-    current.setDate(current.getDate() + 1);
-  }
-  
-  let longestActiveStreak = 0, currentActiveStreak = 0;
-  let longestRestStreak = 0, currentRestStreak = 0;
-  
-  allDates.forEach(date => {
-    if (activityDays.has(date)) {
-      currentActiveStreak++;
-      longestActiveStreak = Math.max(longestActiveStreak, currentActiveStreak);
-      longestRestStreak = Math.max(longestRestStreak, currentRestStreak);
-      currentRestStreak = 0;
-    } else {
-      currentRestStreak++;
-      longestRestStreak = Math.max(longestRestStreak, currentRestStreak);
-      longestActiveStreak = Math.max(longestActiveStreak, currentActiveStreak);
-      currentActiveStreak = 0;
-    }
-  });
-  longestActiveStreak = Math.max(longestActiveStreak, currentActiveStreak);
-  longestRestStreak = Math.max(longestRestStreak, currentRestStreak);
-  
-  // Last 28 days analysis
-  const now = new Date();
-  const twentyEightDaysAgo = new Date(now.getTime() - 28 * 24 * 60 * 60 * 1000);
-  let activeDaysLast28 = 0;
-  activityDays.forEach(day => {
-    if (new Date(day) >= twentyEightDaysAgo) activeDaysLast28++;
-  });
-  
-  // Sessions per week for last 4 weeks
-  const sessionsPerWeekLast4: number[] = [];
-  for (let w = 0; w < 4; w++) {
-    const weekEnd = new Date(now.getTime() - w * 7 * 24 * 60 * 60 * 1000);
-    const weekStart = new Date(weekEnd.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const count = activities.filter(a => {
-      const d = new Date(a.start_date_local);
-      return d >= weekStart && d < weekEnd;
-    }).length;
-    sessionsPerWeekLast4.push(count);
-  }
-  
-  return {
-    totalActivities: activities.length,
-    weeksSpan,
-    avgSessionsPerWeek: parseFloat((activities.length / weeksSpan).toFixed(1)),
-    longestActiveStreak,
-    longestRestStreak,
-    restDaysLast28: 28 - activeDaysLast28,
-    activeDaysLast28,
-    sessionsPerWeekLast4
-  };
-};
-
-// Format consistency metrics for the prompt
-const formatConsistencyMetrics = (metrics: ConsistencyMetrics): string => {
-  if (metrics.totalActivities === 0) return "Not enough data.";
-  
-  let text = "";
-  text += `• Sessions (last 4 weeks): ${metrics.sessionsPerWeekLast4.join(', ')} per week\n`;
-  text += `• Avg frequency: ${metrics.avgSessionsPerWeek} sessions/week\n`;
-  text += `• Active days (last 28d): ${metrics.activeDaysLast28} | Rest days: ${metrics.restDaysLast28}\n`;
-  text += `• Longest active streak: ${metrics.longestActiveStreak} consecutive days\n`;
-  text += `• Longest rest period: ${metrics.longestRestStreak} consecutive days\n`;
-  
-  // Flag potential issues
-  if (metrics.longestActiveStreak >= 7) {
-    text += `⚠️ ${metrics.longestActiveStreak}+ days without rest - recovery concern\n`;
-  }
-  if (metrics.longestRestStreak >= 5) {
-    text += `⚠️ ${metrics.longestRestStreak}+ consecutive rest days - consistency gap\n`;
-  }
-  
-  return text;
-};
-
-// Determine workout structure category for matching (more specific than intensity)
-const getWorkoutStructure = (activity: StravaActivity): string => {
-  if (activity.workout_type === 1) return "race";
-  if (activity.workout_type === 3) return "structured";
-  if (activity.workout_type === 2) return "long_run";
-  // Heuristic: check if it has many laps with pace variance (structured without label)
-  if (activity.laps && activity.laps.length >= 4) return "structured";
-  return "steady";
-};
-
-// Get the best comparable pace for an activity:
-// - Outdoor with GAP available: use GAP (elevation-adjusted)
-// - Outdoor without GAP: use raw pace
-// - Treadmill: use raw pace (from treadmill calibration, GPS is junk)
-const getComparablePace = (activity: StravaActivity): { speed: number; label: string } => {
-  if (activity.trainer) {
-    return { speed: activity.average_speed, label: "Treadmill pace" };
-  }
-  if (activity.average_grade_adjusted_speed && activity.average_grade_adjusted_speed !== activity.average_speed) {
-    return { speed: activity.average_grade_adjusted_speed, label: "GAP" };
-  }
-  return { speed: activity.average_speed, label: "Pace" };
-};
-
-// Find the most similar historical workout for comparison
-// Matches on STRUCTURE + LOCATION (treadmill/outdoor) + distance
-// Uses GAP for outdoor comparisons to account for elevation differences
-const findSimilarWorkout = (current: StravaActivity, history: StravaActivity[], maxHR: number): string => {
-  if (history.length === 0) return "";
-  
-  const currentDist = current.distance / 1000;
-  const currentStructure = getWorkoutStructure(current);
-  const currentIsTreadmill = current.trainer === true;
-  
-  // Priority 1: Same structure + same location type + similar distance (within 25%)
-  let candidates = history.filter(a => {
-    const dist = a.distance / 1000;
-    const distRatio = Math.abs(dist - currentDist) / Math.max(currentDist, 0.1);
-    const structure = getWorkoutStructure(a);
-    const sameLocation = (a.trainer === true) === currentIsTreadmill;
-    return distRatio < 0.25 && structure === currentStructure && sameLocation;
-  });
-  
-  // Priority 2: Same structure + same location, any distance
-  if (candidates.length === 0) {
-    candidates = history.filter(a => {
-      const structure = getWorkoutStructure(a);
-      const sameLocation = (a.trainer === true) === currentIsTreadmill;
-      return structure === currentStructure && sameLocation;
-    });
-  }
-  
-  // Priority 3: Same structure + similar distance (cross-location)
-  if (candidates.length === 0) {
-    candidates = history.filter(a => {
-      const dist = a.distance / 1000;
-      const distRatio = Math.abs(dist - currentDist) / Math.max(currentDist, 0.1);
-      const structure = getWorkoutStructure(a);
-      return distRatio < 0.25 && structure === currentStructure;
-    });
-  }
-
-  // Priority 4: Similar distance regardless of structure (last resort)
-  if (candidates.length === 0) {
-    candidates = history.filter(a => {
-      const dist = a.distance / 1000;
-      const distRatio = Math.abs(dist - currentDist) / Math.max(currentDist, 0.1);
-      return distRatio < 0.25;
-    });
-  }
-  
-  if (candidates.length === 0) return "";
-  
-  // Score candidates: structure > location > distance > recency
-  const scored = candidates.map(a => {
-    const dist = a.distance / 1000;
-    const distScore = 1 - Math.abs(dist - currentDist) / Math.max(currentDist, 0.1);
-    const structureScore = getWorkoutStructure(a) === currentStructure ? 1 : 0;
-    const locationScore = (a.trainer === true) === currentIsTreadmill ? 1 : 0;
-    const recency = new Date(a.start_date_local).getTime();
-    return { activity: a, score: structureScore * 4 + locationScore * 3 + distScore * 2, recency };
-  });
-  
-  scored.sort((a, b) => b.score - a.score || b.recency - a.recency);
-  const similar = scored[0].activity;
-  
-  const similarDist = (similar.distance / 1000).toFixed(1);
-  const similarHR = similar.average_heartrate ? Math.round(similar.average_heartrate) : null;
-  const similarDate = formatShortDate(similar.start_date_local);
-  const similarStructure = getWorkoutStructure(similar);
-  const similarIsTreadmill = similar.trainer === true;
-
-  const currentStructureLabel = currentStructure === 'structured' ? 'Structured' 
-    : currentStructure === 'long_run' ? 'Long Run' 
-    : currentStructure === 'race' ? 'Race' : 'Steady';
-  
-  // Match quality assessment
-  const structureMatch = similarStructure === currentStructure;
-  const locationMatch = similarIsTreadmill === currentIsTreadmill;
-  let matchQuality: string;
-  if (structureMatch && locationMatch) matchQuality = "exact match (same structure & location)";
-  else if (structureMatch) matchQuality = "structure match, different location";
-  else matchQuality = "approximate match";
-
-  // Use GAP-adjusted pace for fair comparison (accounts for elevation)
-  const currentPace = getComparablePace(current);
-  const similarPace = getComparablePace(similar);
-  
-  const currentDistStr = currentDist.toFixed(1);
-  const currentPaceStr = formatPace(currentPace.speed);
-  const similarPaceStr = formatPace(similarPace.speed);
-  const currentHR = current.average_heartrate ? Math.round(current.average_heartrate) : null;
-  
-  const currentLocation = currentIsTreadmill ? "🏠 Treadmill" : "🌳 Outdoor";
-  const similarLocation = similarIsTreadmill ? "🏠 Treadmill" : "🌳 Outdoor";
-  
-  // Elevation context
-  const currentElev = Math.round(current.total_elevation_gain || 0);
-  const similarElev = Math.round(similar.total_elevation_gain || 0);
-  
-  let text = "\n[HISTORICAL COMPARISON]\n";
-  text += `Comparing ${currentStructureLabel} sessions (${matchQuality}):\n`;
-  text += `  Previous: "${similar.name}" (${similarDate}, ${similarLocation}) - ${similarDist} km | ${similarPaceStr}/km [${similarPace.label}]`;
-  if (similarHR) text += ` | HR: ${similarHR}`;
-  if (!similarIsTreadmill && similarElev > 10) text += ` | +${similarElev}m`;
-  text += "\n";
-  text += `  Current:  "${current.name}" (${currentLocation}) - ${currentDistStr} km | ${currentPaceStr}/km [${currentPace.label}]`;
-  if (currentHR) text += ` | HR: ${currentHR}`;
-  if (!currentIsTreadmill && currentElev > 10) text += ` | +${currentElev}m`;
-  text += "\n";
-  
-  // Calculate pace difference using comparable (GAP-adjusted) paces
-  const currentPaceSec = currentPace.speed > 0 ? 1000 / currentPace.speed : 0;
-  const similarPaceSec = similarPace.speed > 0 ? 1000 / similarPace.speed : 0;
-  const paceDiff = currentPaceSec - similarPaceSec; // positive = slower
-  const paceAbsDiff = Math.abs(paceDiff);
-  const paceChange = paceDiff < -1 
-    ? `${Math.round(paceAbsDiff)}s/km faster`
-    : paceDiff > 1 
-      ? `${Math.round(paceAbsDiff)}s/km slower`
-      : "Same pace";
-  
-  text += `→ ${currentPace.label}: ${paceChange}`;
-  
-  if (currentHR && similarHR) {
-    const hrDiff = currentHR - similarHR;
-    text += ` | HR: ${hrDiff >= 0 ? '+' : ''}${hrDiff} bpm`;
-    
-    // Only give confident verdicts when comparison is fair
-    if (structureMatch && locationMatch) {
-      // Best case: same structure, same location type → high confidence verdict
-      if (paceDiff < -1 && hrDiff <= 0) text += " ✅ (Faster + lower HR = IMPROVING)";
-      else if (paceDiff < -1 && hrDiff > 3) text += " (Faster but higher HR = pushing harder)";
-      else if (Math.abs(paceDiff) <= 2 && hrDiff < -3) text += " ✅ (Same pace, lower HR = aerobic improvement)";
-      else if (paceDiff > 2 && hrDiff > 0) text += " ⚠️ (Slower + higher HR = possible fatigue)";
-    } else if (structureMatch && !locationMatch) {
-      // Cross-location comparison: note the caveat
-      text += ` (⚠️ cross-location: ${similarLocation} → ${currentLocation} - pace not directly comparable)`;
-    } else {
-      text += " (⚠️ different workout structure - compare with caution)";
-    }
-  }
-  text += "\n";
-  
-  return text;
-};
-
-// Generate session data block (shared between both prompts)
-const generateSessionData = (
-  currentRun: StravaActivity,
-  history: StravaActivity[],
-  zones: HeartRateZoneBucket[],
-  bestEfforts: BestEffort[],
-  rpe: number,
-  maxHR: number
-): string => {
-  const date = new Date(currentRun.start_date_local).toLocaleDateString('en-US');
-  const distanceKm = (currentRun.distance / 1000).toFixed(2);
-  const duration = formatDuration(currentRun.moving_time);
-  const avgPace = formatPace(currentRun.average_speed);
-
-  // GAP (Grade Adjusted Pace) - session level (not relevant for treadmill)
-  const hasGAP = !currentRun.trainer && currentRun.average_grade_adjusted_speed && 
-                 currentRun.average_grade_adjusted_speed !== currentRun.average_speed;
-  const gapPace = hasGAP 
-    ? formatPace(currentRun.average_grade_adjusted_speed!)
-    : null;
-
-  const hrInfo = currentRun.average_heartrate
-    ? `Avg ${Math.round(currentRun.average_heartrate)} bpm, Max ${Math.round(currentRun.max_heartrate || 0)} bpm`
-    : "Not available";
-
-  const cadenceInfo = currentRun.average_cadence
-    ? `${Math.round(currentRun.average_cadence * 2)} spm`
-    : "-";
-
-  // Gear/Shoes
-  const gearInfo = currentRun.gear?.name || (currentRun.gear_id ? `ID: ${currentRun.gear_id}` : "Not specified");
-
-  // Detect running type (structure: intervals, steady, etc.)
-  const runType = detectRunningType(currentRun);
-  
-  // Zone-based intensity classification (more accurate than avg HR)
-  const zoneClassification = zones.length > 0 
-    ? classifyByZones(zones) 
-    : { classification: classifyActivityType(currentRun, maxHR), breakdown: "" };
-  
-  const isTreadmill = currentRun.trainer === true;
-
-  // Calculate decoupling (splits are GPS-based, unreliable on treadmill)
-  const decoupling = !isTreadmill ? calculateDecoupling(currentRun.splits_metric || []) : null;
-
-  // RPE info
-  const rpeLabel = RPE_LABELS[rpe]?.label || 'Moderate';
-
-  // Generate structure text: PRIORITIZE LAPS (manual) over SPLITS (auto)
-  let structureText = "";
-  const hasLaps = currentRun.laps && currentRun.laps.length > 0;
-  const hasSplits = currentRun.splits_metric && currentRun.splits_metric.length > 0;
-
-  if (hasLaps) {
-    structureText = formatLaps(currentRun.laps!, currentRun.average_speed, isTreadmill);
-    
-    // For outdoor structured workouts, also include auto splits as secondary data
-    if (!isTreadmill && hasSplits && runType.hasStructure && currentRun.splits_metric!.length > 3) {
-      structureText += "\n" + formatSplits(currentRun.splits_metric!);
-    }
-  } else if (hasSplits && !isTreadmill) {
-    // Auto splits are GPS-based, only useful outdoors
-    structureText = formatSplits(currentRun.splits_metric!);
-  }
-
-  // Work lap HR drift (for structured workouts)
-  const hrDriftText = hasLaps 
-    ? calculateWorkLapHRDrift(currentRun.laps!, currentRun.average_speed, isTreadmill) 
-    : "";
-
-  // Format zones
-  const zonesText = formatZonesForPrompt(zones);
-
-  // Format PRs
-  const keyPRs = getKeyPRs(bestEfforts);
-  let prsText = keyPRs.length > 0
-    ? keyPRs.map(pr => `- ${pr.name}: ${pr.time}${pr.isPR ? ' 🏆 PR!' : ''}`).join('\n')
-    : "None this session";
-
-  // All activities for aggregate calculations
-  const allActivities = [currentRun, ...history];
-  
-  // Weekly volume trend (4-6 weeks)
-  const weeklyVolumes = calculateWeeklyVolumes(allActivities);
-  const weeklyTable = formatWeeklyVolumesTable(weeklyVolumes);
-  
-  // Consistency metrics
-  const consistency = calculateConsistencyMetrics(allActivities);
-  const consistencyText = formatConsistencyMetrics(consistency);
-  
-  // Historical comparison
-  const comparisonText = findSimilarWorkout(currentRun, history, maxHR);
-  
-  // Generate history table
-  const historyTable = generateHistoryTable(history, maxHR);
-
-  const location = currentRun.trainer ? "Treadmill" : "Outdoor";
-
-  // User description from Strava (often contains manual interval notes, RPE, conditions)
-  const descriptionText = currentRun.description && currentRun.description.trim().length > 0
-    ? `\nATHLETE NOTES: "${currentRun.description.trim()}"\n`
-    : "";
-
-  return `
-SESSION: "${currentRun.name}"
-Date: ${date} | Location: ${location}
-Intensity: ${zoneClassification.classification} (Zone-based)${zoneClassification.breakdown ? ` [${zoneClassification.breakdown}]` : ''}
-Structure: ${runType.type}${runType.detected ? ' (Auto-detected)' : ''}
-${descriptionText}
-ACTIVITY METRICS:
-• Distance: ${distanceKm} km
-• Duration: ${duration}
-• Pace: ${avgPace}/km${gapPace ? ` | GAP (Grade Adjusted): ${gapPace}/km` : ''}
-• Heart Rate: ${hrInfo}
-• Cadence: ${cadenceInfo}
-• Elevation: +${Math.round(currentRun.total_elevation_gain)}m
-• Shoes/Gear: ${gearInfo}
-• RPE: ${rpe}/10 (${rpeLabel}) - User Input
-${decoupling ? `• Aerobic Decoupling: ${decoupling.percentage.toFixed(1)}% (${decoupling.status})${decoupling.elevationAdjusted ? ' [Elevation-adjusted using GAP]' : ' [No elevation data - raw pace]'}` : ''}
-${currentRun.suffer_score ? `• Suffer Score: ${currentRun.suffer_score}` : ''}
-
-HR ZONES (Time Distribution):
-${zonesText}
-BEST EFFORTS:
-${prsText}
-${structureText}${hrDriftText}${comparisonText}
-WEEKLY VOLUME TREND:
-${weeklyTable}
-
-CONSISTENCY (Last 4 weeks):
-${consistencyText}
-RECENT HISTORY:
-${historyTable}`.trim();
-};
-
-// SYSTEM PROMPT - "Heavy" prompt for starting new chat
-const generateSystemPrompt = (
-  currentRun: StravaActivity, 
-  history: StravaActivity[], 
-  profile: UserProfile,
-  zones: HeartRateZoneBucket[],
-  bestEfforts: BestEffort[],
-  rpe: number
-): string => {
-  const sessionData = generateSessionData(currentRun, history, zones, bestEfforts, rpe, profile.maxHR || 0);
-
-  return `
-╔══════════════════════════════════════════════════════════════╗
-║  🏃 RUNNING COACH AI - INITIAL SETUP                         ║
-╚══════════════════════════════════════════════════════════════╝
-
-*** ACT AS A WORLD-CLASS RUNNING COACH & EXERCISE PHYSIOLOGIST ***
-
-You are my personal running coach. We will have an ongoing coaching relationship across multiple sessions. Your role is to:
-
-1. **Track my training** - I will paste new session data regularly
-2. **Analyze trends** - Monitor my fitness progression over time  
-3. **Manage load** - Watch for overtraining and injury risk
-4. **Optimize performance** - Help me reach my goals efficiently
-
-COACHING PHILOSOPHY:
-- Prioritize consistency and injury prevention over short-term gains
-- Use data-driven insights (HR zones, pace trends, VDOT estimation)
-- Consider my personal constraints and injury history
-- Provide actionable, specific recommendations
-
-═══════════════════════════════════════════════════════════════
-MY ATHLETE PROFILE
-═══════════════════════════════════════════════════════════════
-
-• Max Heart Rate: ${profile.maxHR && profile.maxHR > 0 ? `${profile.maxHR} bpm` : 'UNKNOWN - Please estimate based on highest observed HR in my data and age-based formulas'}
-• Resting Heart Rate: ${profile.restingHR && profile.restingHR > 0 ? `${profile.restingHR} bpm` : 'UNKNOWN'}
-• Lactate Threshold: ${profile.lactateThreshold && profile.lactateThreshold.trim() !== '' && profile.lactateThreshold !== '0' ? profile.lactateThreshold : 'UNKNOWN - Please estimate my Lactate Threshold (HR and Pace) based on my recent best efforts, cardiac drift patterns, and pace/HR relationship'}
-• Primary Goal: ${profile.goal || 'Not specified - ask me about my goals'}
-• Injury History: ${profile.injuryHistory || 'None specified'}
-
-═══════════════════════════════════════════════════════════════
-INITIAL TRAINING DATA
-═══════════════════════════════════════════════════════════════
-
-${sessionData}
-
-═══════════════════════════════════════════════════════════════
-INITIAL ANALYSIS REQUEST
-═══════════════════════════════════════════════════════════════
-
-Please analyze this initial data and provide:
-
-1. **Baseline Assessment**: Current fitness level and VDOT estimate
-2. **Training Pattern**: What does my weekly volume trend and consistency data tell you?
-3. **Intensity Distribution**: Am I doing enough easy running? Is my polarized/pyramidal balance correct?
-4. **Today's Session**: Brief analysis of the latest run (use zone classification, not just avg HR)
-5. **Recovery Patterns**: Based on the consistency data, am I getting enough rest?
-6. **Initial Recommendations**: 2-3 specific priorities for my training
-
-IMPORTANT NOTES FOR ANALYSIS:
-- Session intensity is classified by TIME IN HR ZONES, not average HR
-- "Easy / Base" means 70%+ time in Z1-Z2. Trust this over average HR which can be misleading
-- For structured workouts, check the WORK LAP HR PROGRESSION for threshold endurance
-- Rest lap recovery data shows HR drop between intervals - use this to assess aerobic fitness
-- The HISTORICAL COMPARISON section (if present) shows if I'm improving on similar sessions
-- GAP (Grade Adjusted Pace) accounts for hills - use it when elevation is significant
-
-After this, I will paste "Daily Update" messages with new sessions.
-Keep responses concise but insightful.
-`.trim();
-};
-
-// UPDATE PROMPT - "Light" prompt for ongoing sessions
-const generateUpdatePrompt = (
-  currentRun: StravaActivity,
-  history: StravaActivity[],
-  zones: HeartRateZoneBucket[],
-  bestEfforts: BestEffort[],
-  rpe: number,
-  maxHR: number
-): string => {
-  const sessionData = generateSessionData(currentRun, history, zones, bestEfforts, rpe, maxHR);
-
-  return `
-📅 DAILY TRAINING UPDATE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Here is my latest training session. Based on our ongoing coaching thread and my profile history:
-
-${sessionData}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ANALYSIS REQUEST:
-
-1. **Session Classification**: Verify the zone-based intensity label. Was this correctly classified?
-2. **Trend Check**: Compare with the HISTORICAL COMPARISON data (if available). Am I improving?
-3. **Weekly Load**: Review the WEEKLY VOLUME TREND. Is progression safe (<10% week-over-week)?
-4. **Consistency**: Check rest day pattern. Any recovery concerns?
-5. **Interval Quality** (if applicable): Check work lap HR drift and rest recovery data
-6. **Next Session**: What should I focus on next given my weekly load and consistency?
-
-Keep it brief - just the key insights.
-`.trim();
 };
 
 // Custom Tooltip for the chart
@@ -1398,6 +131,7 @@ export default function DashboardClient({
     }
     return map;
   });
+  const [weatherMap, setWeatherMap] = useState<Map<number, WeatherData | null>>(new Map());
 
   // Filter valid runs first
   const validRuns = useMemo(() => filterValidRuns(enrichedActivities), [enrichedActivities]);
@@ -1419,43 +153,103 @@ export default function DashboardClient({
     return bestEffortsMap.get(currentRun.id) || [];
   }, [currentRun, bestEffortsMap, initialBestEfforts]);
 
+  const weather = useMemo(() => {
+    if (!currentRun?.id) return null;
+    return weatherMap.get(currentRun.id) || null;
+  }, [currentRun, weatherMap]);
+
   // Fetch detailed data for selected activity if not already enriched
   const fetchActivityDetail = useCallback(async (activity: StravaActivity, activityIndex: number) => {
-    // Skip if already has detailed data (splits_metric present = enriched)
-    if (activity.splits_metric && activity.splits_metric.length > 0) return;
+    // Check local cache first
+    const cachedData = getCachedActivityDetail(activity.id);
+    const hasDetailedData = activity.splits_metric && activity.splits_metric.length > 0;
+    const hasWeatherInCache = cachedData && cachedData.weather !== undefined;
+
+    if (hasDetailedData && (hasWeatherInCache || activity.trainer)) return; // Skip if fully enriched
     if (!activity.id) return;
 
-    setLoadingDetail(true);
-    try {
-      const res = await fetch(`/api/strava/activity/${activity.id}`);
-      if (!res.ok) {
-        console.error("[Enrich] Failed to fetch detail for activity", activity.id);
-        return;
-      }
-      const data = await res.json();
-
-      if (data.detailed) {
-        // Merge detailed data into the enriched activities array
+    if (cachedData && hasWeatherInCache) {
+      if (cachedData.detailed) {
         setEnrichedActivities(prev => {
           const updated = [...prev];
-          // Find the activity in the full list by id
           const fullIndex = updated.findIndex(a => a.id === activity.id);
           if (fullIndex >= 0) {
-            updated[fullIndex] = { ...updated[fullIndex], ...data.detailed };
+            updated[fullIndex] = { ...updated[fullIndex], ...cachedData.detailed };
           }
           return updated;
         });
       }
+      if (cachedData.heartRateZones?.length > 0) {
+        setZonesMap(prev => new Map(prev).set(activity.id, cachedData.heartRateZones));
+      }
+      if (cachedData.bestEfforts?.length > 0) {
+        setBestEffortsMap(prev => new Map(prev).set(activity.id, cachedData.bestEfforts));
+      }
+      if (cachedData.weather) {
+        setWeatherMap(prev => new Map(prev).set(activity.id, cachedData.weather!));
+      }
+      return; // Fast exit, used cache
+    }
 
-      if (data.heartRateZones && data.heartRateZones.length > 0) {
-        setZonesMap(prev => new Map(prev).set(activity.id, data.heartRateZones));
+    setLoadingDetail(true);
+    try {
+      // Fetch Strava data if not already fetched
+      let detailed = cachedData?.detailed || null;
+      let hrZones = cachedData?.heartRateZones || [];
+      let efforts = cachedData?.bestEfforts || [];
+
+      if (!hasDetailedData) {
+        const res = await fetch(`/api/strava/activity/${activity.id}`);
+        if (!res.ok) {
+          console.error("[Enrich] Failed to fetch detail for activity", activity.id);
+        } else {
+          const data = await res.json();
+          detailed = data.detailed || null;
+          hrZones = data.heartRateZones || [];
+          efforts = data.bestEfforts || [];
+
+          if (detailed) {
+            setEnrichedActivities(prev => {
+              const updated = [...prev];
+              const fullIndex = updated.findIndex(a => a.id === activity.id);
+              if (fullIndex >= 0) {
+                updated[fullIndex] = { ...updated[fullIndex], ...detailed };
+              }
+              return updated;
+            });
+          }
+          if (hrZones.length > 0) {
+            setZonesMap(prev => new Map(prev).set(activity.id, hrZones));
+          }
+          if (efforts.length > 0) {
+            setBestEffortsMap(prev => new Map(prev).set(activity.id, efforts));
+          }
+        }
       }
 
-      if (data.bestEfforts && data.bestEfforts.length > 0) {
-        setBestEffortsMap(prev => new Map(prev).set(activity.id, data.bestEfforts));
+      // Fetch Weather if missing
+      let newWeather: WeatherData | null = cachedData?.weather || null;
+      const combinedActivity = { ...activity, ...detailed };
+      
+      if (!newWeather && !combinedActivity.trainer && combinedActivity.start_latlng) {
+        const [lat, lng] = combinedActivity.start_latlng;
+        newWeather = await getHistoricalWeather(lat, lng, combinedActivity.start_date_local);
+        if (newWeather) {
+          setWeatherMap(prev => new Map(prev).set(activity.id, newWeather!));
+        }
       }
+
+      // Save to cache for next time
+      setCachedActivityDetail(
+        activity.id, 
+        detailed || {}, 
+        hrZones || [], 
+        efforts || [],
+        newWeather
+      );
+
     } catch (err) {
-      console.error("[Enrich] Error fetching activity detail:", err);
+      console.error("[Enrich] Error fetching activity detail/weather:", err);
     } finally {
       setLoadingDetail(false);
     }
@@ -1496,16 +290,35 @@ export default function DashboardClient({
     setIsLoaded(true);
   }, []);
 
+  // Handle RPE persistence per activity
+  useEffect(() => {
+    if (currentRun?.id && typeof window !== "undefined") {
+      const savedRpe = localStorage.getItem(`runprompt_rpe_${currentRun.id}`);
+      if (savedRpe) {
+        setRpe(parseInt(savedRpe, 10));
+      } else {
+        setRpe(5); // default
+      }
+    }
+  }, [currentRun?.id]);
+
+  const handleRpeChange = (newRpe: number) => {
+    setRpe(newRpe);
+    if (currentRun?.id && typeof window !== "undefined") {
+      localStorage.setItem(`runprompt_rpe_${currentRun.id}`, newRpe.toString());
+    }
+  };
+
   // Generate prompts dynamically based on mode, RPE, and current data
   const systemPrompt = useMemo(() => {
     if (!currentRun) return "";
-    return generateSystemPrompt(currentRun, history, userProfile, heartRateZones, bestEfforts, rpe);
-  }, [currentRun, history, userProfile, heartRateZones, bestEfforts, rpe]);
+    return generateSystemPrompt(currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather);
+  }, [currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather]);
 
   const updatePrompt = useMemo(() => {
     if (!currentRun) return "";
-    return generateUpdatePrompt(currentRun, history, heartRateZones, bestEfforts, rpe, userProfile.maxHR || 0);
-  }, [currentRun, history, heartRateZones, bestEfforts, rpe, userProfile.maxHR]);
+    return generateUpdatePrompt(currentRun, history, heartRateZones, bestEfforts, rpe, userProfile.maxHR || 0, weather);
+  }, [currentRun, history, heartRateZones, bestEfforts, rpe, userProfile.maxHR, weather]);
 
   // Get the active prompt based on mode
   const activePrompt = promptMode === 'setup' ? systemPrompt : updatePrompt;
@@ -1879,7 +692,7 @@ export default function DashboardClient({
         {/* AI Prompt Section */}
         <Card className="bg-slate-900/50 border-slate-800 shadow-2xl shadow-purple-900/10">
           <CardHeader className="space-y-4">
-            <div className="flex flex-row items-center justify-between">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <CardTitle className="text-white flex items-center gap-2">
                 AI Coaching Prompt
                 {loadingDetail && (
@@ -1888,12 +701,27 @@ export default function DashboardClient({
                   </span>
                 )}
               </CardTitle>
-              <Button 
-                onClick={handleCopy}
-                className={`transition-all duration-300 ${copied ? 'bg-green-600 hover:bg-green-700' : 'bg-purple-600 hover:bg-purple-700'}`}
-              >
-                {copied ? <><Check className="w-4 h-4 mr-2" /> Copied!</> : <><Copy className="w-4 h-4 mr-2" /> Copy Prompt</>}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button 
+                  onClick={handleCopy}
+                  className={`transition-all duration-300 ${copied ? 'bg-green-600 hover:bg-green-700' : 'bg-purple-600 hover:bg-purple-700'}`}
+                >
+                  {copied ? <><Check className="w-4 h-4 mr-2" /> Copied!</> : <><Copy className="w-4 h-4 mr-2" /> Copy Prompt</>}
+                </Button>
+                {copied && (
+                  <div className="flex gap-2 ml-2 animate-in fade-in zoom-in duration-300">
+                    <Button variant="outline" size="icon" className="bg-[#10a37f] hover:bg-[#10a37f]/90 border-0" onClick={() => window.open('https://chatgpt.com', '_blank')}>
+                      <svg viewBox="0 0 24 24" className="w-4 h-4 text-white" fill="currentColor"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.073zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.0993 3.8558L12.5973 8.3829a.7664.7664 0 0 0-.7806 0L5.974 11.7514v-2.3324a.0757.0757 0 0 1 .0332-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66v5.5958l-.142-.0853-4.7783-2.7582a.7948.7948 0 0 0-.3927-.6813z"/></svg>
+                    </Button>
+                    <Button variant="outline" size="icon" className="bg-[#D97757] hover:bg-[#D97757]/90 border-0" onClick={() => window.open('https://claude.ai/new', '_blank')}>
+                      <span className="text-white font-serif font-bold text-lg">C</span>
+                    </Button>
+                    <Button variant="outline" size="icon" className="bg-[#4285F4] hover:bg-[#4285F4]/90 border-0" onClick={() => window.open('https://gemini.google.com/app', '_blank')}>
+                      <svg viewBox="0 0 24 24" className="w-4 h-4 text-white" fill="currentColor"><path d="M12 24c-1.33 0-2.4-.44-3.19-1.32-.79-.88-1.19-2.04-1.19-3.48V16h-3.6c-1.44 0-2.6-.4-3.48-1.2C-.34 14.01-.73 12.85-.73 11.41c0-1.44.39-2.6 1.18-3.48.79-.88 1.95-1.32 3.49-1.32h3.6V3.01c0-1.44.4-2.6 1.19-3.48.8-.88 1.86-1.32 3.19-1.32 1.33 0 2.4.44 3.19 1.32.79.88 1.19 2.04 1.19 3.48v3.6h3.6c1.44 0 2.6.44 3.48 1.32.88.88 1.32 2.04 1.32 3.48 0 1.44-.44 2.6-1.32 3.48-.88.88-2.04 1.2-3.48 1.2h-3.6v3.2c0 1.44-.4 2.6-1.19 3.48-.79.88-1.86 1.32-3.19 1.32z"/></svg>
+                    </Button>
+                  </div>
+                )}
+              </div>
             </div>
             
             {/* Mode Toggle Tabs */}
@@ -1955,7 +783,7 @@ export default function DashboardClient({
                   min="1"
                   max="10"
                   value={rpe}
-                  onChange={(e) => setRpe(parseInt(e.target.value))}
+                  onChange={(e) => handleRpeChange(parseInt(e.target.value))}
                   className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
                   style={{
                     background: `linear-gradient(to right, 
