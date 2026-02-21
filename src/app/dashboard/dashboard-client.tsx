@@ -158,6 +158,22 @@ export default function DashboardClient({
     return weatherMap.get(currentRun.id) || null;
   }, [currentRun, weatherMap]);
 
+  // Aggregate best efforts across ALL activities for accurate VDOT calculation
+  const allTimeBestEfforts = useMemo(() => {
+    const effortsByName = new Map<string, BestEffort>();
+    bestEffortsMap.forEach(efforts => {
+      efforts.forEach(effort => {
+        if (effort.distance >= 1500) { // Only meaningful distances
+          const existing = effortsByName.get(effort.name);
+          if (!existing || effort.elapsed_time < existing.elapsed_time) {
+            effortsByName.set(effort.name, effort);
+          }
+        }
+      });
+    });
+    return Array.from(effortsByName.values());
+  }, [bestEffortsMap]);
+
   // Fetch detailed data for selected activity if not already enriched
   const fetchActivityDetail = useCallback(async (activity: StravaActivity, activityIndex: number) => {
     // Check local cache first
@@ -261,7 +277,53 @@ export default function DashboardClient({
       fetchActivityDetail(currentRun, selectedActivityIndex);
     }
   }, [selectedActivityIndex, currentRun, fetchActivityDetail]);
-  
+
+  // Background fetch: get best efforts for ALL activities (for accurate VDOT)
+  useEffect(() => {
+    const fetchAllBestEfforts = async () => {
+      // Find activities we don't have best efforts for yet
+      const missingIds = validRuns
+        .filter(a => a.id && !bestEffortsMap.has(a.id))
+        .map(a => a.id);
+
+      if (missingIds.length === 0) return;
+
+      // Check cache first for any we might have stored
+      const stillMissing: number[] = [];
+      missingIds.forEach(id => {
+        const cached = getCachedActivityDetail(id);
+        if (cached && cached.bestEfforts?.length > 0) {
+          setBestEffortsMap(prev => new Map(prev).set(id, cached.bestEfforts));
+        } else {
+          stillMissing.push(id);
+        }
+      });
+
+      if (stillMissing.length === 0) return;
+
+      try {
+        const res = await fetch(`/api/strava/best-efforts?ids=${stillMissing.join(',')}`);
+        if (res.ok) {
+          const data: Record<string, any[]> = await res.json();
+          setBestEffortsMap(prev => {
+            const updated = new Map(prev);
+            Object.entries(data).forEach(([id, efforts]) => {
+              if (efforts.length > 0) {
+                updated.set(Number(id), efforts);
+              }
+            });
+            return updated;
+          });
+        }
+      } catch (err) {
+        console.error("[VDOT] Error fetching best efforts for all activities:", err);
+      }
+    };
+
+    fetchAllBestEfforts();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [validRuns.length]); // Only re-run when activity count changes
+
   // Prepare chart data
   const chartData = useMemo(() => prepareChartData(validRuns), [validRuns]);
 
@@ -312,13 +374,13 @@ export default function DashboardClient({
   // Generate prompts dynamically based on mode, RPE, and current data
   const systemPrompt = useMemo(() => {
     if (!currentRun) return "";
-    return generateSystemPrompt(currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather);
-  }, [currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather]);
+    return generateSystemPrompt(currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather, allTimeBestEfforts);
+  }, [currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather, allTimeBestEfforts]);
 
   const updatePrompt = useMemo(() => {
     if (!currentRun) return "";
-    return generateUpdatePrompt(currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather);
-  }, [currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather]);
+    return generateUpdatePrompt(currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather, allTimeBestEfforts);
+  }, [currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather, allTimeBestEfforts]);
 
   // Get the active prompt based on mode
   const activePrompt = promptMode === 'setup' ? systemPrompt : updatePrompt;

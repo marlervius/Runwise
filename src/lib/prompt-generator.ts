@@ -111,39 +111,31 @@ const formatZonesForPrompt = (zones: HeartRateZoneBucket[]): string => {
   return text;
 };
 
-const getEstimatedVDOT = (bestEfforts: BestEffort[], currentRun: StravaActivity): number => {
+// Estimate VDOT from the best performances across ALL activities
+// Uses aggregated best efforts (fastest per distance) for accuracy
+const getEstimatedVDOT = (allTimeBestEfforts: BestEffort[]): number => {
   let highestVDOT = 0;
-  
-  // Check best efforts from current run
-  if (bestEfforts && bestEfforts.length > 0) {
-    bestEfforts.forEach(effort => {
-      // Only consider efforts > 1500m for meaningful VDOT
+
+  if (allTimeBestEfforts && allTimeBestEfforts.length > 0) {
+    allTimeBestEfforts.forEach(effort => {
       if (effort.distance >= 1500) {
         const vdot = estimateVDOT(effort.distance, effort.elapsed_time);
         if (vdot > highestVDOT) highestVDOT = vdot;
       }
     });
   }
-  
-  // If no good best efforts, try the overall run (if it was a race/hard effort)
-  if (highestVDOT === 0 && currentRun.distance >= 1500) {
-    // Only use full run if it was hard (e.g. race or high HR)
-    if (currentRun.workout_type === 1 || (currentRun.average_heartrate && currentRun.max_heartrate && currentRun.average_heartrate > currentRun.max_heartrate * 0.85)) {
-       highestVDOT = estimateVDOT(currentRun.distance, currentRun.moving_time);
-    }
-  }
-  
+
   return highestVDOT;
 };
 
-const generateMicroProfile = (profile: UserProfile, bestEfforts: BestEffort[], currentRun: StravaActivity): string => {
+const generateMicroProfile = (profile: UserProfile, allTimeBestEfforts: BestEffort[]): string => {
   let text = `[ATHLETE PHYSIOLOGY & RULES]\n`;
   text += `• Goal: ${profile.goal || 'Not specified'}\n`;
-  
+
   if (profile.maxHR > 0) {
     text += `• Max HR: ${profile.maxHR} bpm | Resting: ${profile.restingHR || '?'} bpm\n`;
     text += `• Lactate Threshold: ${profile.lactateThreshold || 'Unknown'}\n`;
-    
+
     const zones = calculateHRZones(profile.maxHR);
     if (zones.length > 0) {
       text += `• HR Zones (Absolute): ${zones.map(z => `${z.zone.split(' ')[0]}: ${z.min}-${z.max}`).join(', ')}\n`;
@@ -151,10 +143,10 @@ const generateMicroProfile = (profile: UserProfile, bestEfforts: BestEffort[], c
   } else {
     text += `• Max HR: Unknown (Please estimate)\n`;
   }
-  
-  const currentVDOT = getEstimatedVDOT(bestEfforts, currentRun);
+
+  const currentVDOT = getEstimatedVDOT(allTimeBestEfforts);
   if (currentVDOT > 0) {
-    text += `• Est. Current VDOT: ~${currentVDOT.toFixed(1)} (based on recent best efforts)\n`;
+    text += `• Est. Current VDOT: ~${currentVDOT.toFixed(1)} (based on best performances across all recent activities)\n`;
   }
   
   if (profile.injuryHistory) {
@@ -694,13 +686,14 @@ ${historyTable}`.trim();
 };
 
 export const generateSystemPrompt = (
-  currentRun: StravaActivity, 
-  history: StravaActivity[], 
+  currentRun: StravaActivity,
+  history: StravaActivity[],
   profile: UserProfile,
   zones: HeartRateZoneBucket[],
   bestEfforts: BestEffort[],
   rpe: number,
-  weather: WeatherData | null = null
+  weather: WeatherData | null = null,
+  allTimeBestEfforts: BestEffort[] = []
 ): string => {
   const sessionData = generateSessionData(currentRun, history, zones, bestEfforts, rpe, profile.maxHR || 0, weather);
 
@@ -714,7 +707,7 @@ export const generateSystemPrompt = (
 You are my personal running coach. We will have an ongoing coaching relationship across multiple sessions. Your role is to:
 
 1. **Track my training** - I will paste new session data regularly
-2. **Analyze trends** - Monitor my fitness progression over time  
+2. **Analyze trends** - Monitor my fitness progression over time
 3. **Manage load** - Watch for overtraining and injury risk
 4. **Optimize performance** - Help me reach my goals efficiently
 
@@ -729,7 +722,7 @@ COACHING PHILOSOPHY & TONE:
 MY ATHLETE PROFILE
 ═══════════════════════════════════════════════════════════════
 
-${generateMicroProfile(profile, bestEfforts, currentRun)}
+${generateMicroProfile(profile, allTimeBestEfforts.length > 0 ? allTimeBestEfforts : bestEfforts)}
 
 ═══════════════════════════════════════════════════════════════
 INITIAL TRAINING DATA
@@ -776,7 +769,8 @@ export const generateUpdatePrompt = (
   zones: HeartRateZoneBucket[],
   bestEfforts: BestEffort[],
   rpe: number,
-  weather: WeatherData | null = null
+  weather: WeatherData | null = null,
+  allTimeBestEfforts: BestEffort[] = []
 ): string => {
   const sessionData = generateSessionData(currentRun, history, zones, bestEfforts, rpe, profile.maxHR || 0, weather);
 
@@ -786,7 +780,7 @@ export const generateUpdatePrompt = (
 
 Here is my latest training session. Based on our ongoing coaching thread and my profile history:
 
-${generateMicroProfile(profile, bestEfforts, currentRun)}
+${generateMicroProfile(profile, allTimeBestEfforts.length > 0 ? allTimeBestEfforts : bestEfforts)}
 
 ${sessionData}
 
