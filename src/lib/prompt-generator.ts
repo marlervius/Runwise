@@ -11,7 +11,9 @@ import {
   getWorkoutStructure,
   getComparablePace,
   calculateACWR,
-  analyzeShoeRotation
+  analyzeShoeRotation,
+  calculateHRZones,
+  estimateVDOT
 } from "./metrics";
 import { WeatherData } from "./weather";
 
@@ -105,6 +107,59 @@ const formatZonesForPrompt = (zones: HeartRateZoneBucket[]): string => {
       : 0;
     text += `- ${label} (${zone.min}-${zone.max} bpm): ${timeStr} (${percentage}%)\n`;
   });
+  
+  return text;
+};
+
+const getEstimatedVDOT = (bestEfforts: BestEffort[], currentRun: StravaActivity): number => {
+  let highestVDOT = 0;
+  
+  // Check best efforts from current run
+  if (bestEfforts && bestEfforts.length > 0) {
+    bestEfforts.forEach(effort => {
+      // Only consider efforts > 1500m for meaningful VDOT
+      if (effort.distance >= 1500) {
+        const vdot = estimateVDOT(effort.distance, effort.elapsed_time);
+        if (vdot > highestVDOT) highestVDOT = vdot;
+      }
+    });
+  }
+  
+  // If no good best efforts, try the overall run (if it was a race/hard effort)
+  if (highestVDOT === 0 && currentRun.distance >= 1500) {
+    // Only use full run if it was hard (e.g. race or high HR)
+    if (currentRun.workout_type === 1 || (currentRun.average_heartrate && currentRun.max_heartrate && currentRun.average_heartrate > currentRun.max_heartrate * 0.85)) {
+       highestVDOT = estimateVDOT(currentRun.distance, currentRun.moving_time);
+    }
+  }
+  
+  return highestVDOT;
+};
+
+const generateMicroProfile = (profile: UserProfile, bestEfforts: BestEffort[], currentRun: StravaActivity): string => {
+  let text = `[ATHLETE PHYSIOLOGY & RULES]\n`;
+  text += `• Goal: ${profile.goal || 'Not specified'}\n`;
+  
+  if (profile.maxHR > 0) {
+    text += `• Max HR: ${profile.maxHR} bpm | Resting: ${profile.restingHR || '?'} bpm\n`;
+    text += `• Lactate Threshold: ${profile.lactateThreshold || 'Unknown'}\n`;
+    
+    const zones = calculateHRZones(profile.maxHR);
+    if (zones.length > 0) {
+      text += `• HR Zones (Absolute): ${zones.map(z => `${z.zone.split(' ')[0]}: ${z.min}-${z.max}`).join(', ')}\n`;
+    }
+  } else {
+    text += `• Max HR: Unknown (Please estimate)\n`;
+  }
+  
+  const currentVDOT = getEstimatedVDOT(bestEfforts, currentRun);
+  if (currentVDOT > 0) {
+    text += `• Est. Current VDOT: ~${currentVDOT.toFixed(1)} (based on recent best efforts)\n`;
+  }
+  
+  if (profile.injuryHistory) {
+    text += `• Injury Notes: ${profile.injuryHistory}\n`;
+  }
   
   return text;
 };
@@ -674,11 +729,7 @@ COACHING PHILOSOPHY & TONE:
 MY ATHLETE PROFILE
 ═══════════════════════════════════════════════════════════════
 
-• Max Heart Rate: ${profile.maxHR && profile.maxHR > 0 ? `${profile.maxHR} bpm` : 'UNKNOWN - Please estimate based on highest observed HR in my data and age-based formulas'}
-• Resting Heart Rate: ${profile.restingHR && profile.restingHR > 0 ? `${profile.restingHR} bpm` : 'UNKNOWN'}
-• Lactate Threshold: ${profile.lactateThreshold && profile.lactateThreshold.trim() !== '' && profile.lactateThreshold !== '0' ? profile.lactateThreshold : 'UNKNOWN - Please estimate my Lactate Threshold (HR and Pace) based on my recent best efforts, cardiac drift patterns, and pace/HR relationship'}
-• Primary Goal: ${profile.goal || 'Not specified - ask me about my goals'}
-• Injury History: ${profile.injuryHistory || 'None specified'}
+${generateMicroProfile(profile, bestEfforts, currentRun)}
 
 ═══════════════════════════════════════════════════════════════
 INITIAL TRAINING DATA
@@ -707,6 +758,12 @@ IMPORTANT NOTES FOR ANALYSIS:
 - The HISTORICAL COMPARISON section (if present) shows if I'm improving on similar sessions
 - GAP (Grade Adjusted Pace) accounts for hills - use it when elevation is significant
 
+🚨 ANTI-HALLUCINATION RULES (CRITICAL) 🚨:
+- DO NOT calculate HR zones yourself. Use the [ATHLETE PHYSIOLOGY & RULES] absolute HR Zone table as truth.
+- DO NOT invent or guess metrics like pace, distance, or HR if they are missing or say "0".
+- DO NOT try to remember old workouts from our chat history. Use ONLY the "RECENT HISTORY" and "HISTORICAL COMPARISON" tables provided in this prompt as your source of truth.
+- If data is missing to answer a question, explicitly state "Data not available" instead of making an assumption.
+
 After this, I will paste "Daily Update" messages with new sessions.
 Keep responses concise but insightful.
 `.trim();
@@ -715,19 +772,21 @@ Keep responses concise but insightful.
 export const generateUpdatePrompt = (
   currentRun: StravaActivity,
   history: StravaActivity[],
+  profile: UserProfile,
   zones: HeartRateZoneBucket[],
   bestEfforts: BestEffort[],
   rpe: number,
-  maxHR: number,
   weather: WeatherData | null = null
 ): string => {
-  const sessionData = generateSessionData(currentRun, history, zones, bestEfforts, rpe, maxHR, weather);
+  const sessionData = generateSessionData(currentRun, history, zones, bestEfforts, rpe, profile.maxHR || 0, weather);
 
   return `
 📅 DAILY TRAINING UPDATE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Here is my latest training session. Based on our ongoing coaching thread and my profile history:
+
+${generateMicroProfile(profile, bestEfforts, currentRun)}
 
 ${sessionData}
 
@@ -741,6 +800,9 @@ ANALYSIS REQUEST:
 5. **Interval Quality** (if applicable): Check work lap HR drift and rest recovery data
 6. **Next Session**: What should I focus on next given my weekly load and consistency?
 
-Keep it brief - just the key insights.
+🚨 ANTI-HALLUCINATION RULES (CRITICAL) 🚨:
+- Keep the response brief (key insights only).
+- DO NOT calculate HR zones yourself. Use the [ATHLETE PHYSIOLOGY & RULES] absolute HR Zone table above as absolute truth.
+- DO NOT refer to workouts from older chat history. Rely ONLY on the tables in this prompt for trends.
 `.trim();
 };

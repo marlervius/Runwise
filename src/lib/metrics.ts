@@ -451,3 +451,33 @@ export const analyzeShoeRotation = (activities: StravaActivity[]): { stats: Shoe
 
   return { stats, primaryShoeOverused };
 };
+
+// Estimate VDOT from a given distance (meters) and time (seconds)
+// Formula based on Jack Daniels' VDOT approximation
+export const estimateVDOT = (distanceMeters: number, timeSeconds: number): number => {
+  if (distanceMeters < 1500 || timeSeconds <= 0) return 0; // Too short for meaningful VDOT
+
+  const timeMinutes = timeSeconds / 60;
+  const speedMetersPerMin = distanceMeters / timeMinutes;
+
+  const vo2 = -4.60 + 0.182258 * speedMetersPerMin + 0.000104 * Math.pow(speedMetersPerMin, 2);
+  const percentMax = 0.8 + 0.1894393 * Math.exp(-0.012778 * timeMinutes) + 0.2989558 * Math.exp(-0.1932605 * timeMinutes);
+  
+  if (percentMax <= 0) return 0;
+  
+  const vdot = vo2 / percentMax;
+  return Math.max(0, Math.round(vdot * 10) / 10);
+};
+
+// Calculate absolute HR zones (bpm) based on Max HR
+export const calculateHRZones = (maxHR: number): { zone: string, min: number, max: number }[] => {
+  if (!maxHR || maxHR <= 0) return [];
+  
+  return [
+    { zone: "Z1 Recovery", min: Math.round(maxHR * 0.50), max: Math.round(maxHR * 0.65) },
+    { zone: "Z2 Easy/Base", min: Math.round(maxHR * 0.65), max: Math.round(maxHR * 0.76) },
+    { zone: "Z3 Tempo", min: Math.round(maxHR * 0.76), max: Math.round(maxHR * 0.85) },
+    { zone: "Z4 Threshold", min: Math.round(maxHR * 0.85), max: Math.round(maxHR * 0.92) },
+    { zone: "Z5 VO2max", min: Math.round(maxHR * 0.92), max: maxHR }
+  ];
+};

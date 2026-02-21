@@ -317,8 +317,8 @@ export default function DashboardClient({
 
   const updatePrompt = useMemo(() => {
     if (!currentRun) return "";
-    return generateUpdatePrompt(currentRun, history, heartRateZones, bestEfforts, rpe, userProfile.maxHR || 0, weather);
-  }, [currentRun, history, heartRateZones, bestEfforts, rpe, userProfile.maxHR, weather]);
+    return generateUpdatePrompt(currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather);
+  }, [currentRun, history, userProfile, heartRateZones, bestEfforts, rpe, weather]);
 
   // Get the active prompt based on mode
   const activePrompt = promptMode === 'setup' ? systemPrompt : updatePrompt;
