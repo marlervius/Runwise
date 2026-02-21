@@ -272,11 +272,14 @@ export default function DashboardClient({
   }, []);
 
   // When user selects a different activity, fetch its detailed data
+  // Use currentRun.id (not currentRun object) to avoid re-triggering when enriched data merges in
+  const currentRunId = currentRun?.id;
   useEffect(() => {
-    if (currentRun && currentRun.id) {
+    if (currentRun && currentRunId) {
       fetchActivityDetail(currentRun, selectedActivityIndex);
     }
-  }, [selectedActivityIndex, currentRun, fetchActivityDetail]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedActivityIndex, currentRunId]);
 
   // Background fetch: get best efforts for ALL activities (for accurate VDOT)
   useEffect(() => {
