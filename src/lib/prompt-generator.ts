@@ -13,7 +13,8 @@ import {
   calculateACWR,
   analyzeShoeRotation,
   calculateHRZones,
-  estimateVDOT
+  estimateVDOT,
+  estimateVDOTFromTempo
 } from "./metrics";
 import { WeatherData } from "./weather";
 
@@ -111,24 +112,44 @@ const formatZonesForPrompt = (zones: HeartRateZoneBucket[]): string => {
   return text;
 };
 
-// Estimate VDOT from the best performances across ALL activities
-// Uses aggregated best efforts (fastest per distance) for accuracy
-const getEstimatedVDOT = (allTimeBestEfforts: BestEffort[]): number => {
-  let highestVDOT = 0;
-
+// Estimate VDOT using two methods and take the highest:
+// 1. Raw best efforts (Strava segments) — accurate for races, underestimates for training
+// 2. Tempo/threshold adjustment — uses HR to identify threshold laps and adjusts for submaximal effort
+const getEstimatedVDOT = (
+  allTimeBestEfforts: BestEffort[],
+  allActivities: StravaActivity[],
+  maxHR: number
+): { vdot: number; method: string } => {
+  // Method 1: Raw best efforts
+  let bestEffortVDOT = 0;
   if (allTimeBestEfforts && allTimeBestEfforts.length > 0) {
     allTimeBestEfforts.forEach(effort => {
       if (effort.distance >= 1500) {
         const vdot = estimateVDOT(effort.distance, effort.elapsed_time);
-        if (vdot > highestVDOT) highestVDOT = vdot;
+        if (vdot > bestEffortVDOT) bestEffortVDOT = vdot;
       }
     });
   }
 
-  return highestVDOT;
+  // Method 2: Tempo/threshold lap analysis
+  const tempoVDOT = estimateVDOTFromTempo(allActivities, maxHR);
+
+  // Use the higher of the two estimates
+  if (tempoVDOT > bestEffortVDOT && tempoVDOT > 0) {
+    return { vdot: tempoVDOT, method: "threshold pace analysis" };
+  }
+  if (bestEffortVDOT > 0) {
+    return { vdot: bestEffortVDOT, method: "best race/segment efforts" };
+  }
+
+  return { vdot: 0, method: "" };
 };
 
-const generateMicroProfile = (profile: UserProfile, allTimeBestEfforts: BestEffort[]): string => {
+const generateMicroProfile = (
+  profile: UserProfile,
+  allTimeBestEfforts: BestEffort[],
+  allActivities: StravaActivity[]
+): string => {
   let text = `[ATHLETE PHYSIOLOGY & RULES]\n`;
   text += `• Goal: ${profile.goal || 'Not specified'}\n`;
 
@@ -144,9 +165,9 @@ const generateMicroProfile = (profile: UserProfile, allTimeBestEfforts: BestEffo
     text += `• Max HR: Unknown (Please estimate)\n`;
   }
 
-  const currentVDOT = getEstimatedVDOT(allTimeBestEfforts);
-  if (currentVDOT > 0) {
-    text += `• Est. Current VDOT: ~${currentVDOT.toFixed(1)} (based on best performances across all recent activities)\n`;
+  const { vdot, method } = getEstimatedVDOT(allTimeBestEfforts, allActivities, profile.maxHR || 0);
+  if (vdot > 0) {
+    text += `• Est. Current VDOT: ~${vdot.toFixed(1)} (via ${method})\n`;
   }
   
   if (profile.injuryHistory) {
@@ -722,7 +743,7 @@ COACHING PHILOSOPHY & TONE:
 MY ATHLETE PROFILE
 ═══════════════════════════════════════════════════════════════
 
-${generateMicroProfile(profile, allTimeBestEfforts.length > 0 ? allTimeBestEfforts : bestEfforts)}
+${generateMicroProfile(profile, allTimeBestEfforts.length > 0 ? allTimeBestEfforts : bestEfforts, [currentRun, ...history])}
 
 ═══════════════════════════════════════════════════════════════
 INITIAL TRAINING DATA
@@ -780,7 +801,7 @@ export const generateUpdatePrompt = (
 
 Here is my latest training session. Based on our ongoing coaching thread and my profile history:
 
-${generateMicroProfile(profile, allTimeBestEfforts.length > 0 ? allTimeBestEfforts : bestEfforts)}
+${generateMicroProfile(profile, allTimeBestEfforts.length > 0 ? allTimeBestEfforts : bestEfforts, [currentRun, ...history])}
 
 ${sessionData}
 

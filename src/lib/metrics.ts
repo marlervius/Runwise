@@ -462,10 +462,99 @@ export const estimateVDOT = (distanceMeters: number, timeSeconds: number): numbe
 
   const vo2 = -4.60 + 0.182258 * speedMetersPerMin + 0.000104 * Math.pow(speedMetersPerMin, 2);
   const percentMax = 0.8 + 0.1894393 * Math.exp(-0.012778 * timeMinutes) + 0.2989558 * Math.exp(-0.1932605 * timeMinutes);
-  
+
   if (percentMax <= 0) return 0;
-  
+
   const vdot = vo2 / percentMax;
+  return Math.max(0, Math.round(vdot * 10) / 10);
+};
+
+// Estimate VDOT from tempo/threshold workout data
+// Uses HR-pace relationship to extrapolate race performance:
+// - Identifies hard sustained segments (>= 78% maxHR, >= 3 min)
+// - Estimates %VO2max from %HRmax using Swain formula
+// - Uses median of estimates to filter outliers (e.g. treadmill anomalies)
+export const estimateVDOTFromTempo = (
+  activities: StravaActivity[],
+  maxHR: number
+): number => {
+  if (!maxHR || maxHR <= 0) return 0;
+
+  // Minimum HR 78% of maxHR — ensures the effort was genuinely hard
+  // Below this, the HR-pace extrapolation becomes unreliable
+  // (especially on treadmill where HR can be artificially low)
+  const minHR = maxHR * 0.78;
+
+  // Collect sustained hard segments from all activities
+  const hardSegments: { speedMperMin: number; hrPercent: number }[] = [];
+
+  activities.forEach(activity => {
+    // Check manual laps (from structured workouts)
+    if (activity.laps && activity.laps.length >= 2) {
+      activity.laps.forEach(lap => {
+        if (
+          lap.distance >= 800 &&
+          lap.moving_time >= 180 && // At least 3 minutes sustained
+          lap.average_speed > 0 &&
+          lap.average_heartrate &&
+          lap.average_heartrate >= minHR
+        ) {
+          hardSegments.push({
+            speedMperMin: lap.average_speed * 60,
+            hrPercent: lap.average_heartrate / maxHR
+          });
+        }
+      });
+    }
+
+    // Check km splits for steady tempo/threshold runs
+    if (activity.splits_metric && activity.splits_metric.length >= 3) {
+      activity.splits_metric.forEach((split: any) => {
+        if (
+          split.distance >= 800 &&
+          split.average_speed > 0 &&
+          split.average_heartrate &&
+          split.average_heartrate >= minHR
+        ) {
+          hardSegments.push({
+            speedMperMin: split.average_speed * 60,
+            hrPercent: split.average_heartrate / maxHR
+          });
+        }
+      });
+    }
+  });
+
+  if (hardSegments.length === 0) return 0;
+
+  // Calculate VDOT estimate for each segment
+  const vdotEstimates: number[] = [];
+
+  hardSegments.forEach(segment => {
+    // Calculate VO2 at this pace using Daniels' formula
+    const vo2AtPace = -4.60 + 0.182258 * segment.speedMperMin + 0.000104 * Math.pow(segment.speedMperMin, 2);
+
+    // Estimate %VO2max from %HRmax using the Swain et al. formula:
+    // %VO2max = (%HRmax × 1.12) - 12
+    const pctVO2max = (segment.hrPercent * 100 * 1.12 - 12) / 100;
+
+    if (pctVO2max <= 0.5 || pctVO2max > 1.0) return; // Sanity check
+
+    // Extrapolate to VO2max
+    const estimatedVO2max = vo2AtPace / pctVO2max;
+    if (estimatedVO2max > 20 && estimatedVO2max < 85) { // Reasonable VDOT range
+      vdotEstimates.push(estimatedVO2max);
+    }
+  });
+
+  if (vdotEstimates.length === 0) return 0;
+
+  // Use 75th percentile to balance between capturing fitness and filtering outliers
+  // Median would be too conservative; max is affected by treadmill/outlier anomalies
+  vdotEstimates.sort((a, b) => a - b);
+  const p75Index = Math.floor(vdotEstimates.length * 0.75);
+  const vdot = vdotEstimates[Math.min(p75Index, vdotEstimates.length - 1)];
+
   return Math.max(0, Math.round(vdot * 10) / 10);
 };
 
