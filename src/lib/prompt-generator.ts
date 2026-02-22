@@ -98,17 +98,20 @@ export const getKeyPRs = (bestEfforts: BestEffort[]) => {
 
 const formatZonesForPrompt = (zones: HeartRateZoneBucket[]): string => {
   if (!zones || zones.length === 0) return "Heart Rate Zone data not available.";
-  
+
   let text = "";
   zones.forEach((zone, index) => {
     const label = ZONE_COLORS[index]?.label || `Zone ${index + 1}`;
     const timeStr = formatDurationLong(zone.time);
-    const percentage = zones.reduce((sum, z) => sum + z.time, 0) > 0 
-      ? ((zone.time / zones.reduce((sum, z) => sum + z.time, 0)) * 100).toFixed(0)
+    const totalTime = zones.reduce((sum, z) => sum + z.time, 0);
+    const percentage = totalTime > 0
+      ? ((zone.time / totalTime) * 100).toFixed(0)
       : 0;
-    text += `- ${label} (${zone.min}-${zone.max} bpm): ${timeStr} (${percentage}%)\n`;
+    // Strava returns -1 as open-ended upper bound for the last zone
+    const maxStr = zone.max < 0 ? '∞' : `${zone.max}`;
+    text += `- ${label} (${zone.min}-${maxStr} bpm): ${timeStr} (${percentage}%)\n`;
   });
-  
+
   return text;
 };
 
@@ -165,7 +168,11 @@ const generateMicroProfile = (
       const zoneLabels = ['Z1', 'Z2', 'Z3', 'Z4', 'Z5'];
       const zoneText = stravaZones
         .slice(0, 5)
-        .map((z, i) => `${zoneLabels[i] || `Z${i+1}`}: ${z.min}-${z.max}`)
+        .map((z, i) => {
+          // Strava uses -1 as open-ended upper bound for the last zone
+          const maxStr = z.max < 0 ? `${profile.maxHR}+` : `${z.max}`;
+          return `${zoneLabels[i] || `Z${i+1}`}: ${z.min}-${maxStr}`;
+        })
         .join(', ');
       text += `• HR Zones (Absolute): ${zoneText}\n`;
     } else {
