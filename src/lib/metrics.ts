@@ -818,6 +818,58 @@ export const estimateVDOTFromTempo = (
   return Math.max(0, Math.round(weightedVDOT * 10) / 10);
 };
 
+// ─────────────────────────────────────────────────────────────────
+// JACK DANIELS TRAINING PACES (derived from VDOT)
+// ─────────────────────────────────────────────────────────────────
+// Each training zone corresponds to a % of VO2max (= VDOT):
+//   E  (Easy/Recovery):  59–74% — conversational, aerobic base
+//   M  (Marathon):       ~80%   — comfortably hard, marathon race pace
+//   T  (Threshold/Tempo): 86%   — "comfortably hard", ~1hr race effort
+//   I  (Interval):       ~98%   — vVO2max, 3–5 min reps
+//   R  (Repetition):    ~105%   — speed/economy, short fast reps
+//
+// Solve pace from VO2 via Daniels O2 Cost: VO2 = -4.60 + 0.182258v + 0.000104v²
+// Quadratic: 0.000104v² + 0.182258v - (VO2 + 4.60) = 0
+// v = (-0.182258 + sqrt(0.182258² + 4*0.000104*(VO2+4.60))) / (2*0.000104)
+// ─────────────────────────────────────────────────────────────────
+
+const vo2ToSpeedMperMin = (vo2: number): number => {
+  const a = 0.000104;
+  const b = 0.182258;
+  const c = -(vo2 + 4.60);
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant < 0) return 0;
+  return (-b + Math.sqrt(discriminant)) / (2 * a);
+};
+
+const speedToPaceStr = (speedMperMin: number): string => {
+  if (speedMperMin <= 0) return '—';
+  const secsPerKm = 1000 / speedMperMin * 60; // convert m/min → sec/km
+  const mins = Math.floor(secsPerKm / 60);
+  const secs = Math.round(secsPerKm % 60);
+  return `${mins}:${secs.toString().padStart(2, '0')}/km`;
+};
+
+export interface DanielsTrainingPaces {
+  easy: string;       // E: ~65% VO2max (middle of easy range)
+  marathon: string;   // M: ~80% VO2max
+  threshold: string;  // T: ~86% VO2max
+  interval: string;   // I: ~98% VO2max (vVO2max)
+  repetition: string; // R: ~105% VO2max
+}
+
+export const getDanielsTrainingPaces = (vdot: number): DanielsTrainingPaces | null => {
+  if (!vdot || vdot <= 0) return null;
+
+  return {
+    easy:       speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.65)),
+    marathon:   speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.80)),
+    threshold:  speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.86)),
+    interval:   speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.98)),
+    repetition: speedToPaceStr(vo2ToSpeedMperMin(vdot * 1.05)),
+  };
+};
+
 // Calculate absolute HR zones (bpm) based on Max HR
 export const calculateHRZones = (maxHR: number): { zone: string, min: number, max: number }[] => {
   if (!maxHR || maxHR <= 0) return [];

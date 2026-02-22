@@ -14,7 +14,8 @@ import {
   analyzeShoeRotation,
   calculateHRZones,
   estimateVDOT,
-  estimateVDOTFromTempo
+  estimateVDOTFromTempo,
+  getDanielsTrainingPaces
 } from "./metrics";
 import { WeatherData } from "./weather";
 
@@ -188,6 +189,12 @@ const generateMicroProfile = (
   const { vdot, method } = getEstimatedVDOT(allTimeBestEfforts, allActivities, profile.maxHR || 0, profile.restingHR || 0);
   if (vdot > 0) {
     text += `• Est. Current VDOT: ~${vdot.toFixed(1)} (via ${method})\n`;
+
+    // Add Daniels training paces so the coach can give concrete pace recommendations
+    const paces = getDanielsTrainingPaces(vdot);
+    if (paces) {
+      text += `• Training Paces (Daniels): E: ${paces.easy} | M: ${paces.marathon} | T: ${paces.threshold} | I: ${paces.interval} | R: ${paces.repetition}\n`;
+    }
   }
   
   if (profile.injuryHistory) {
