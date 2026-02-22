@@ -585,10 +585,10 @@ const estimateVDOTRegression = (
   dataPoints: SpeedHRDataPoint[],
   maxHR: number
 ): { vdot: number; r2: number; n: number } | null => {
-  // Filter to outdoor only for regression (treadmill GPS pace unreliable)
+  // Filter to outdoor only (treadmill GPS pace unreliable for regression)
   let points = dataPoints.filter(p => !p.isTreadmill);
 
-  // If not enough outdoor data, include treadmill but with reduced weight
+  // If not enough outdoor data, include treadmill
   if (points.length < 6) {
     points = dataPoints;
   }
@@ -613,13 +613,13 @@ const estimateVDOTRegression = (
   // Convert speed at HRmax to VO2
   const vo2AtMax = speedToVO2(speedAtHRmax);
 
-  // At HRmax, a runner sustains about 75-85% VO2max for ~10-15 min
-  // But the regression extrapolation gives us vVO2max (speed at VO2max)
-  // Since we're extrapolating to HRmax, the runner CAN'T maintain HRmax
-  // indefinitely. The Firstbeat model applies a correction:
-  // At true HRmax effort, an average runner operates at ~95-98% VO2max
-  // We use 0.97 as the correction factor (conservative)
-  const estimatedVO2max = vo2AtMax / 0.97;
+  // The speed-HR relationship is approximately linear at submaximal effort
+  // but flattens near HRmax (cardiac drift, anaerobic contribution).
+  // Linear extrapolation therefore OVERSHOOTS the true speed at HRmax.
+  // Additionally, at HRmax a runner operates at ~95% VO2max (not 100%).
+  // Combined correction: multiply by 0.92 to account for both effects.
+  // This is conservative: 0.95 (non-linearity) × 0.97 (submaximal) ≈ 0.92
+  const estimatedVO2max = vo2AtMax * 0.92;
 
   if (estimatedVO2max < 20 || estimatedVO2max > 85) return null;
 
@@ -638,13 +638,18 @@ const estimateVDOTFromHRR = (
   const hrRange = maxHR - restingHR;
   if (hrRange <= 20) return null; // Unrealistic HR range
 
-  // Only use segments with HR >= 70% HRR (moderate to hard effort)
-  // This is where the %HRR = %VO2R relationship is most accurate
-  const minHRR = 0.60;
+  // Exclude treadmill data: pace is set by machine, not by runner's
+  // actual output, leading to inflated efficiency estimates (VDOT 51-54)
+  const outdoorPoints = dataPoints.filter(p => !p.isTreadmill);
+
+  // Only use segments with HR >= 70% HRR (hard effort)
+  // Below 70% HRR, the %HRR = %VO2R relationship becomes less accurate
+  // and moderate-effort segments tend to inflate estimates
+  const minHRR = 0.70;
 
   const vdotEstimates: number[] = [];
 
-  dataPoints.forEach(point => {
+  outdoorPoints.forEach(point => {
     const hrr = (point.hr - restingHR) / hrRange; // %HRR as fraction
 
     if (hrr < minHRR || hrr > 1.0) return;
@@ -680,15 +685,18 @@ const estimateVDOTFromHRR = (
 // Method 3: Fallback using Londeree equation (%HRmax → %VO2max)
 // %VO2max = 1.408 × %HRmax - 45.1
 // Less accurate than %HRR but doesn't require restingHR
+// Note: Tends to overestimate for well-trained runners with low resting HR
 const estimateVDOTFromHRmax = (
   dataPoints: SpeedHRDataPoint[],
   maxHR: number
 ): { vdot: number; n: number } | null => {
-  const minHR = maxHR * 0.75; // Only use data from 75%+ HRmax
+  // Exclude treadmill and only use hard outdoor data (80%+ HRmax)
+  const minHR = maxHR * 0.80;
+  const outdoorPoints = dataPoints.filter(p => !p.isTreadmill);
 
   const vdotEstimates: number[] = [];
 
-  dataPoints.forEach(point => {
+  outdoorPoints.forEach(point => {
     if (point.hr < minHR) return;
 
     const hrMaxPct = (point.hr / maxHR) * 100; // as percentage (e.g., 82)
@@ -737,23 +745,25 @@ export const estimateVDOTFromTempo = (
 
   const estimates: { vdot: number; weight: number; method: string }[] = [];
 
-  // Regression method: weight based on R² quality
+  // HRR method: gold standard when restingHR is available (%HRR=%VO2R, r=0.990)
+  // This is the most physiologically sound method, give it highest weight
+  if (hrrMethod && hrrMethod.n >= 5) {
+    estimates.push({ vdot: hrrMethod.vdot, weight: 3.0, method: 'hrr' });
+  } else if (hrrMethod) {
+    estimates.push({ vdot: hrrMethod.vdot, weight: 2.0, method: 'hrr' });
+  }
+
+  // Regression method: good supporting evidence but tends to overshoot
+  // Weight based on R² quality, but lower than HRR
   if (regression && regression.r2 > 0.4) {
-    // Higher R² = more weight (0.4→low trust, 0.9→high trust)
-    const weight = regression.r2 >= 0.7 ? 3.0 : regression.r2 >= 0.5 ? 2.0 : 1.0;
+    const weight = regression.r2 >= 0.7 ? 2.0 : regression.r2 >= 0.5 ? 1.5 : 1.0;
     estimates.push({ vdot: regression.vdot, weight, method: 'regression' });
   }
 
-  // HRR method: gold standard when restingHR is available
-  if (hrrMethod && hrrMethod.n >= 5) {
-    estimates.push({ vdot: hrrMethod.vdot, weight: 2.5, method: 'hrr' });
-  } else if (hrrMethod) {
-    estimates.push({ vdot: hrrMethod.vdot, weight: 1.5, method: 'hrr' });
-  }
-
-  // HRmax fallback: only if other methods aren't available or as a tiebreaker
+  // HRmax fallback (Londeree): only used when other methods unavailable
+  // Systematically overestimates for trained runners with low resting HR
   if (hrmaxMethod) {
-    const weight = estimates.length === 0 ? 2.0 : 1.0;
+    const weight = estimates.length === 0 ? 2.0 : 0.5;
     estimates.push({ vdot: hrmaxMethod.vdot, weight, method: 'hrmax' });
   }
 
