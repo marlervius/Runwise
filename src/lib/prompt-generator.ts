@@ -149,7 +149,8 @@ const getEstimatedVDOT = (
 const generateMicroProfile = (
   profile: UserProfile,
   allTimeBestEfforts: BestEffort[],
-  allActivities: StravaActivity[]
+  allActivities: StravaActivity[],
+  stravaZones: HeartRateZoneBucket[] = []
 ): string => {
   let text = `[ATHLETE PHYSIOLOGY & RULES]\n`;
   text += `• Goal: ${profile.goal || 'Not specified'}\n`;
@@ -158,9 +159,20 @@ const generateMicroProfile = (
     text += `• Max HR: ${profile.maxHR} bpm | Resting: ${profile.restingHR || '?'} bpm\n`;
     text += `• Lactate Threshold: ${profile.lactateThreshold || 'Unknown'}\n`;
 
-    const zones = calculateHRZones(profile.maxHR);
-    if (zones.length > 0) {
-      text += `• HR Zones (Absolute): ${zones.map(z => `${z.zone.split(' ')[0]}: ${z.min}-${z.max}`).join(', ')}\n`;
+    // Use the athlete's actual HR zones from Strava (matches their watch/settings)
+    // Fall back to calculated zones only if Strava zones are unavailable
+    if (stravaZones.length > 0) {
+      const zoneLabels = ['Z1', 'Z2', 'Z3', 'Z4', 'Z5'];
+      const zoneText = stravaZones
+        .slice(0, 5)
+        .map((z, i) => `${zoneLabels[i] || `Z${i+1}`}: ${z.min}-${z.max}`)
+        .join(', ');
+      text += `• HR Zones (Absolute): ${zoneText}\n`;
+    } else {
+      const zones = calculateHRZones(profile.maxHR);
+      if (zones.length > 0) {
+        text += `• HR Zones (Absolute): ${zones.map(z => `${z.zone.split(' ')[0]}: ${z.min}-${z.max}`).join(', ')}\n`;
+      }
     }
   } else {
     text += `• Max HR: Unknown (Please estimate)\n`;
@@ -744,7 +756,7 @@ COACHING PHILOSOPHY & TONE:
 MY ATHLETE PROFILE
 ═══════════════════════════════════════════════════════════════
 
-${generateMicroProfile(profile, allTimeBestEfforts.length > 0 ? allTimeBestEfforts : bestEfforts, [currentRun, ...history])}
+${generateMicroProfile(profile, allTimeBestEfforts.length > 0 ? allTimeBestEfforts : bestEfforts, [currentRun, ...history], zones)}
 
 ═══════════════════════════════════════════════════════════════
 INITIAL TRAINING DATA
@@ -802,7 +814,7 @@ export const generateUpdatePrompt = (
 
 Here is my latest training session. Based on our ongoing coaching thread and my profile history:
 
-${generateMicroProfile(profile, allTimeBestEfforts.length > 0 ? allTimeBestEfforts : bestEfforts, [currentRun, ...history])}
+${generateMicroProfile(profile, allTimeBestEfforts.length > 0 ? allTimeBestEfforts : bestEfforts, [currentRun, ...history], zones)}
 
 ${sessionData}
 
