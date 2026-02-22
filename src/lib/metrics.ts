@@ -551,11 +551,14 @@ const collectSpeedHRData = (
     }
 
     // Fallback: activity-level average when no detailed data is loaded yet.
-    // Less accurate (includes warmup/cooldown HR drag) but always available.
-    // Only use for runs with meaningful duration (>= 15 min) and HR data.
+    // Activity averages include warmup/cooldown so they underrepresent intensity.
+    // Only use for harder efforts (avg HR >= 75% maxHR) where the warmup drag
+    // is proportionally smaller and the estimate is more meaningful.
+    // Easy runs (avg HR < 75% maxHR) are too noisy and underestimate VO2max.
+    const activityMinHR = maxHR * 0.75;
     if (!addedDetailedPoints &&
         activity.average_heartrate &&
-        activity.average_heartrate >= minHR &&
+        activity.average_heartrate >= activityMinHR &&
         activity.average_heartrate <= maxHR &&
         activity.average_speed > 0 &&
         activity.moving_time >= 900 // at least 15 minutes

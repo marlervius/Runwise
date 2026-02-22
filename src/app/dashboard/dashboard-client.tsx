@@ -327,6 +327,53 @@ export default function DashboardClient({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [validRuns.length]); // Only re-run when activity count changes
 
+  // Background fetch: load laps/splits for the 10 most recent activities
+  // so VDOT calculator has real segment data to work with (not just activity averages)
+  useEffect(() => {
+    const fetchRecentDetails = async () => {
+      // Only fetch for activities missing laps/splits, up to 10 most recent
+      const needsDetail = validRuns
+        .slice(0, 10)
+        .filter(a => a.id && !a.splits_metric && !a.laps);
+
+      // Process sequentially with a small delay to avoid rate-limiting
+      for (const activity of needsDetail) {
+        const cached = getCachedActivityDetail(activity.id);
+        if (cached?.detailed?.splits_metric) {
+          // Already cached — merge into enrichedActivities
+          setEnrichedActivities(prev => {
+            const updated = [...prev];
+            const idx = updated.findIndex(a => a.id === activity.id);
+            if (idx >= 0) updated[idx] = { ...updated[idx], ...cached.detailed };
+            return updated;
+          });
+          continue;
+        }
+
+        try {
+          const res = await fetch(`/api/strava/activity/${activity.id}`);
+          if (!res.ok) continue;
+          const data = await res.json();
+          if (data.detailed) {
+            setEnrichedActivities(prev => {
+              const updated = [...prev];
+              const idx = updated.findIndex(a => a.id === activity.id);
+              if (idx >= 0) updated[idx] = { ...updated[idx], ...data.detailed };
+              return updated;
+            });
+          }
+        } catch {
+          // Silently skip failed fetches
+        }
+        // Small delay between requests to be kind to the API
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+    };
+
+    fetchRecentDetails();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [validRuns.length]);
+
   // Prepare chart data
   const chartData = useMemo(() => prepareChartData(validRuns), [validRuns]);
 
