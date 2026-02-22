@@ -492,7 +492,12 @@ interface SpeedHRDataPoint {
   isTreadmill: boolean;
 }
 
-// Collect speed/HR data points from laps and km splits across all activities
+// Collect speed/HR data points from activities.
+// Priority order:
+//   1. Manual laps (from structured workouts) — most reliable
+//   2. km splits — good for steady-state runs
+//   3. Activity-level average — always available, noisier (includes warmup/cooldown)
+//      Used as fallback when an activity hasn't been fully loaded yet.
 const collectSpeedHRData = (
   activities: StravaActivity[],
   maxHR: number
@@ -502,6 +507,7 @@ const collectSpeedHRData = (
 
   activities.forEach(activity => {
     const isTreadmill = activity.trainer === true;
+    let addedDetailedPoints = false;
 
     // From manual laps (structured workouts) - prefer these as they're cleaner
     if (activity.laps && activity.laps.length >= 2) {
@@ -519,6 +525,7 @@ const collectSpeedHRData = (
             hr: lap.average_heartrate,
             isTreadmill
           });
+          addedDetailedPoints = true;
         }
       });
     }
@@ -538,7 +545,25 @@ const collectSpeedHRData = (
             hr: split.average_heartrate,
             isTreadmill
           });
+          addedDetailedPoints = true;
         }
+      });
+    }
+
+    // Fallback: activity-level average when no detailed data is loaded yet.
+    // Less accurate (includes warmup/cooldown HR drag) but always available.
+    // Only use for runs with meaningful duration (>= 15 min) and HR data.
+    if (!addedDetailedPoints &&
+        activity.average_heartrate &&
+        activity.average_heartrate >= minHR &&
+        activity.average_heartrate <= maxHR &&
+        activity.average_speed > 0 &&
+        activity.moving_time >= 900 // at least 15 minutes
+    ) {
+      dataPoints.push({
+        speedMperMin: activity.average_speed * 60,
+        hr: activity.average_heartrate,
+        isTreadmill
       });
     }
   });
