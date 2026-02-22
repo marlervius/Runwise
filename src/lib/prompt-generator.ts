@@ -118,9 +118,10 @@ const formatZonesForPrompt = (zones: HeartRateZoneBucket[]): string => {
 const getEstimatedVDOT = (
   allTimeBestEfforts: BestEffort[],
   allActivities: StravaActivity[],
-  maxHR: number
+  maxHR: number,
+  restingHR: number = 0
 ): { vdot: number; method: string } => {
-  // Method 1: Raw best efforts
+  // Method 1: Raw best efforts (race results / Strava segments)
   let bestEffortVDOT = 0;
   if (allTimeBestEfforts && allTimeBestEfforts.length > 0) {
     allTimeBestEfforts.forEach(effort => {
@@ -131,12 +132,12 @@ const getEstimatedVDOT = (
     });
   }
 
-  // Method 2: Tempo/threshold lap analysis
-  const tempoVDOT = estimateVDOTFromTempo(allActivities, maxHR);
+  // Method 2: Training data analysis (regression + HRR + HRmax methods)
+  const tempoVDOT = estimateVDOTFromTempo(allActivities, maxHR, restingHR);
 
   // Use the higher of the two estimates
   if (tempoVDOT > bestEffortVDOT && tempoVDOT > 0) {
-    return { vdot: tempoVDOT, method: "threshold pace analysis" };
+    return { vdot: tempoVDOT, method: "training data analysis (HR-pace regression)" };
   }
   if (bestEffortVDOT > 0) {
     return { vdot: bestEffortVDOT, method: "best race/segment efforts" };
@@ -165,7 +166,7 @@ const generateMicroProfile = (
     text += `• Max HR: Unknown (Please estimate)\n`;
   }
 
-  const { vdot, method } = getEstimatedVDOT(allTimeBestEfforts, allActivities, profile.maxHR || 0);
+  const { vdot, method } = getEstimatedVDOT(allTimeBestEfforts, allActivities, profile.maxHR || 0, profile.restingHR || 0);
   if (vdot > 0) {
     text += `• Est. Current VDOT: ~${vdot.toFixed(1)} (via ${method})\n`;
   }
