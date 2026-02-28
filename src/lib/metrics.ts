@@ -605,170 +605,63 @@ const collectSpeedHRData = (
   return dataPoints;
 };
 
-// Simple linear regression: y = slope * x + intercept
-const linearRegression = (
-  points: { x: number; y: number }[]
-): { slope: number; intercept: number; r2: number } | null => {
-  const n = points.length;
-  if (n < 3) return null;
-
-  const sumX = points.reduce((s, p) => s + p.x, 0);
-  const sumY = points.reduce((s, p) => s + p.y, 0);
-  const sumXY = points.reduce((s, p) => s + p.x * p.y, 0);
-  const sumX2 = points.reduce((s, p) => s + p.x * p.x, 0);
-  const sumY2 = points.reduce((s, p) => s + p.y * p.y, 0);
-
-  const denom = n * sumX2 - sumX * sumX;
-  if (Math.abs(denom) < 1e-10) return null;
-
-  const slope = (n * sumXY - sumX * sumY) / denom;
-  const intercept = (sumY - slope * sumX) / n;
-
-  // R² calculation
-  const meanY = sumY / n;
-  const ssTotal = points.reduce((s, p) => s + Math.pow(p.y - meanY, 2), 0);
-  const ssResidual = points.reduce((s, p) => s + Math.pow(p.y - (slope * p.x + intercept), 2), 0);
-  const r2 = ssTotal > 0 ? 1 - ssResidual / ssTotal : 0;
-
-  return { slope, intercept, r2 };
-};
-
 // Convert speed (m/min) to VO2 using Daniels' O2 Cost formula
 const speedToVO2 = (speedMperMin: number): number => {
   return -4.60 + 0.182258 * speedMperMin + 0.000104 * Math.pow(speedMperMin, 2);
 };
 
-// Method 1: Firstbeat-style linear regression
-// Regress speed vs HR, extrapolate to HRmax to find vVO2max
-const estimateVDOTRegression = (
-  dataPoints: SpeedHRDataPoint[],
-  maxHR: number
-): { vdot: number; r2: number; n: number } | null => {
-  // Filter to outdoor only (treadmill GPS pace unreliable for regression)
-  let points = dataPoints.filter(p => !p.isTreadmill);
-
-  // If not enough outdoor data, include treadmill
-  if (points.length < 6) {
-    points = dataPoints;
-  }
-
-  if (points.length < 5) return null;
-
-  // Build regression: HR (x) → speed (y)
-  // We want to find: at HRmax, what speed can the runner sustain?
-  const regData = points.map(p => ({ x: p.hr, y: p.speedMperMin }));
-  const reg = linearRegression(regData);
-
-  if (!reg || reg.r2 < 0.3) return null; // Poor fit, don't trust
-  if (reg.slope <= 0) return null; // Speed should increase with HR
-
-  // Extrapolate: what speed at HRmax?
-  const speedAtHRmax = reg.slope * maxHR + reg.intercept;
-
-  // Sanity check: speed at HRmax should be reasonable (3:00-8:00/km pace)
-  // 3:00/km = 333 m/min, 8:00/km = 125 m/min
-  if (speedAtHRmax < 125 || speedAtHRmax > 400) return null;
-
-  // Convert speed at HRmax to VO2
-  const vo2AtMax = speedToVO2(speedAtHRmax);
-
-  // The speed-HR relationship is approximately linear at submaximal effort
-  // but flattens near HRmax (cardiac drift, anaerobic contribution).
-  // Linear extrapolation therefore OVERSHOOTS the true speed at HRmax.
-  // Additionally, at HRmax a runner operates at ~95% VO2max (not 100%).
-  // Combined correction: multiply by 0.92 to account for both effects.
-  // This is conservative: 0.95 (non-linearity) × 0.97 (submaximal) ≈ 0.92
-  const estimatedVO2max = vo2AtMax * 0.92;
-
-  if (estimatedVO2max < 20 || estimatedVO2max > 85) return null;
-
-  return { vdot: estimatedVO2max, r2: reg.r2, n: points.length };
-};
-
 // Treadmill speed correction:
 // Running on a treadmill is easier than outdoor by ~3% due to no air resistance.
 // 1% incline compensates fully; at 0% or 0.5% incline a modest correction is applied.
-// This is used when treadmill data must be included as fallback.
 const TREADMILL_SPEED_CORRECTION = 1.03;
-const MIN_HARD_OUTDOOR_FOR_HRR = 5; // prefer outdoor; fall back to treadmill below this
 
-// Method 2: %HRR = %VO2R per-segment (Swain et al. 1997)
-// Gold standard relationship: %HRR ≈ %VO2R (r=0.990)
-const estimateVDOTFromHRR = (
-  dataPoints: SpeedHRDataPoint[],
+// Estimate VDOT for a single activity using its segments
+// Returns null if not enough quality data in this activity
+const estimateVDOTForActivity = (
+  activity: StravaActivity,
   maxHR: number,
   restingHR: number
-): { vdot: number; n: number; usedTreadmill: boolean } | null => {
-  if (!restingHR || restingHR <= 0) return null;
+): number | null => {
+  const dataPoints = collectSpeedHRData([activity], maxHR);
+  if (dataPoints.length < 1) return null;
 
-  const hrRange = maxHR - restingHR;
-  if (hrRange <= 20) return null; // Unrealistic HR range
+  // Primary: HRR method (most accurate, requires restingHR)
+  if (restingHR > 0) {
+    const hrRange = maxHR - restingHR;
+    if (hrRange > 20) {
+      const minHRR = 0.70;
+      const vo2rest = 3.5;
+      const estimates: number[] = [];
 
-  // Only use segments with HR >= 70% HRR (hard effort)
-  const minHRR = 0.70;
+      dataPoints.forEach(point => {
+        const hrr = (point.hr - restingHR) / hrRange;
+        if (hrr < minHRR || hrr > 1.0) return;
 
-  // Prefer outdoor; include treadmill (with correction) only when there
-  // aren't enough hard outdoor segments (e.g. treadmill-heavy runners)
-  const outdoorPoints = dataPoints.filter(p => !p.isTreadmill);
-  const hardOutdoor = outdoorPoints.filter(p =>
-    (p.hr - restingHR) / hrRange >= minHRR
-  );
-  const useTreadmill = hardOutdoor.length < MIN_HARD_OUTDOOR_FOR_HRR;
-  const candidatePoints = useTreadmill ? dataPoints : outdoorPoints;
+        const effectiveSpeed = point.isTreadmill
+          ? point.speedMperMin * TREADMILL_SPEED_CORRECTION
+          : point.speedMperMin;
 
-  const vdotEstimates: number[] = [];
+        const vo2AtPace = speedToVO2(effectiveSpeed);
+        const est = (vo2AtPace - vo2rest) / hrr + vo2rest;
+        if (est > 25 && est < 80) estimates.push(est);
+      });
 
-  candidatePoints.forEach(point => {
-    const hrr = (point.hr - restingHR) / hrRange;
-    if (hrr < minHRR || hrr > 1.0) return;
-
-    // Apply speed correction for treadmill (no air resistance → easier)
-    const effectiveSpeed = point.isTreadmill
-      ? point.speedMperMin * TREADMILL_SPEED_CORRECTION
-      : point.speedMperMin;
-
-    // %HRR = %VO2R (Swain 1997): solve for VO2max
-    const vo2rest = 3.5;
-    const vo2AtPace = speedToVO2(effectiveSpeed);
-    const estimatedVO2max = (vo2AtPace - vo2rest) / hrr + vo2rest;
-
-    if (estimatedVO2max > 25 && estimatedVO2max < 80) {
-      vdotEstimates.push(estimatedVO2max);
+      if (estimates.length >= 2) {
+        estimates.sort((a, b) => a - b);
+        const mid = Math.floor(estimates.length / 2);
+        return estimates.length % 2 === 0
+          ? (estimates[mid - 1] + estimates[mid]) / 2
+          : estimates[mid];
+      }
     }
-  });
+  }
 
-  if (vdotEstimates.length < 3) return null;
-
-  // Use median for robustness against outliers
-  vdotEstimates.sort((a, b) => a - b);
-  const medianIndex = Math.floor(vdotEstimates.length / 2);
-  const median = vdotEstimates.length % 2 === 0
-    ? (vdotEstimates[medianIndex - 1] + vdotEstimates[medianIndex]) / 2
-    : vdotEstimates[medianIndex];
-
-  return { vdot: median, n: vdotEstimates.length, usedTreadmill: useTreadmill };
-};
-
-// Method 3: Fallback using Londeree equation (%HRmax → %VO2max)
-// %VO2max = 1.408 × %HRmax - 45.1
-// Less accurate than %HRR but doesn't require restingHR
-// Note: Tends to overestimate for well-trained runners with low resting HR
-const estimateVDOTFromHRmax = (
-  dataPoints: SpeedHRDataPoint[],
-  maxHR: number
-): { vdot: number; n: number; usedTreadmill: boolean } | null => {
+  // Fallback: Londeree equation (%HRmax → %VO2max)
   const minHR = maxHR * 0.80;
+  const estimates: number[] = [];
 
-  const outdoorPoints = dataPoints.filter(p => !p.isTreadmill);
-  const hardOutdoor = outdoorPoints.filter(p => p.hr >= minHR);
-  const useTreadmill = hardOutdoor.length < 3;
-  const candidatePoints = useTreadmill ? dataPoints : outdoorPoints;
-
-  const vdotEstimates: number[] = [];
-
-  candidatePoints.forEach(point => {
+  dataPoints.forEach(point => {
     if (point.hr < minHR) return;
-
     const hrMaxPct = (point.hr / maxHR) * 100;
     const pctVO2max = (1.408 * hrMaxPct - 45.1) / 100;
     if (pctVO2max <= 0.4 || pctVO2max > 1.0) return;
@@ -777,28 +670,24 @@ const estimateVDOTFromHRmax = (
       ? point.speedMperMin * TREADMILL_SPEED_CORRECTION
       : point.speedMperMin;
 
-    const vo2AtPace = speedToVO2(effectiveSpeed);
-    const estimatedVO2max = vo2AtPace / pctVO2max;
-
-    if (estimatedVO2max > 25 && estimatedVO2max < 80) {
-      vdotEstimates.push(estimatedVO2max);
-    }
+    const est = speedToVO2(effectiveSpeed) / pctVO2max;
+    if (est > 25 && est < 80) estimates.push(est);
   });
 
-  if (vdotEstimates.length < 3) return null;
+  if (estimates.length >= 2) {
+    estimates.sort((a, b) => a - b);
+    const mid = Math.floor(estimates.length / 2);
+    return estimates.length % 2 === 0
+      ? (estimates[mid - 1] + estimates[mid]) / 2
+      : estimates[mid];
+  }
 
-  // Use median
-  vdotEstimates.sort((a, b) => a - b);
-  const medianIndex = Math.floor(vdotEstimates.length / 2);
-  const median = vdotEstimates.length % 2 === 0
-    ? (vdotEstimates[medianIndex - 1] + vdotEstimates[medianIndex]) / 2
-    : vdotEstimates[medianIndex];
-
-  return { vdot: median, n: vdotEstimates.length, usedTreadmill: useTreadmill };
+  return null;
 };
 
 // Main VDOT estimation from training data
-// Combines regression + HRR methods for best accuracy
+// Computes per-activity VDOT and takes the MEDIAN across recent quality sessions.
+// This prevents a single hard or easy session from swinging the estimate.
 export const estimateVDOTFromTempo = (
   activities: StravaActivity[],
   maxHR: number,
@@ -806,47 +695,24 @@ export const estimateVDOTFromTempo = (
 ): number => {
   if (!maxHR || maxHR <= 0) return 0;
 
-  const dataPoints = collectSpeedHRData(activities, maxHR);
-  if (dataPoints.length < 3) return 0;
+  // Get per-activity VDOT estimates for activities with quality data
+  const perActivityVDOTs: number[] = [];
 
-  // Try all methods and combine
-  const regression = estimateVDOTRegression(dataPoints, maxHR);
-  const hrrMethod = estimateVDOTFromHRR(dataPoints, maxHR, restingHR);
-  const hrmaxMethod = estimateVDOTFromHRmax(dataPoints, maxHR);
+  activities.forEach(activity => {
+    const vdot = estimateVDOTForActivity(activity, maxHR, restingHR);
+    if (vdot !== null) perActivityVDOTs.push(vdot);
+  });
 
-  const estimates: { vdot: number; weight: number; method: string }[] = [];
+  if (perActivityVDOTs.length === 0) return 0;
 
-  // HRR method: gold standard when restingHR is available (%HRR=%VO2R, r=0.990)
-  // Reduce weight when treadmill data had to be used (less accurate)
-  if (hrrMethod) {
-    const baseWeight = hrrMethod.n >= 5 ? 3.0 : 2.0;
-    const weight = hrrMethod.usedTreadmill ? baseWeight * 0.7 : baseWeight;
-    estimates.push({ vdot: hrrMethod.vdot, weight, method: 'hrr' });
-  }
+  // Median of per-activity estimates = stable, resistant to one-off outliers
+  perActivityVDOTs.sort((a, b) => a - b);
+  const mid = Math.floor(perActivityVDOTs.length / 2);
+  const median = perActivityVDOTs.length % 2 === 0
+    ? (perActivityVDOTs[mid - 1] + perActivityVDOTs[mid]) / 2
+    : perActivityVDOTs[mid];
 
-  // Regression method: outdoor only (treadmill GPS speed unreliable for regression)
-  // Weight based on R² quality
-  if (regression && regression.r2 > 0.4) {
-    const weight = regression.r2 >= 0.7 ? 2.0 : regression.r2 >= 0.5 ? 1.5 : 1.0;
-    estimates.push({ vdot: regression.vdot, weight, method: 'regression' });
-  }
-
-  // HRmax fallback (Londeree): used when other methods unavailable
-  // Systematically overestimates for trained runners with low resting HR
-  // Reduce weight further if treadmill data was needed
-  if (hrmaxMethod) {
-    const baseWeight = estimates.length === 0 ? 2.0 : 0.5;
-    const weight = hrmaxMethod.usedTreadmill ? baseWeight * 0.7 : baseWeight;
-    estimates.push({ vdot: hrmaxMethod.vdot, weight, method: 'hrmax' });
-  }
-
-  if (estimates.length === 0) return 0;
-
-  // Weighted average of all methods
-  const totalWeight = estimates.reduce((s, e) => s + e.weight, 0);
-  const weightedVDOT = estimates.reduce((s, e) => s + e.vdot * e.weight, 0) / totalWeight;
-
-  return Math.max(0, Math.round(weightedVDOT * 10) / 10);
+  return Math.max(0, Math.round(median * 10) / 10);
 };
 
 // ─────────────────────────────────────────────────────────────────
@@ -892,12 +758,16 @@ export interface DanielsTrainingPaces {
 export const getDanielsTrainingPaces = (vdot: number): DanielsTrainingPaces | null => {
   if (!vdot || vdot <= 0) return null;
 
+  // Percentages tuned to match practical training paces:
+  // - E slightly slower than pure Daniels (most runners benefit from easier easy)
+  // - T/I/R slightly conservative to avoid overreaching in training
+  // These match the middle of each Daniels zone rather than the fast end.
   return {
-    easy:       speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.65)),
-    marathon:   speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.80)),
-    threshold:  speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.86)),
-    interval:   speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.98)),
-    repetition: speedToPaceStr(vo2ToSpeedMperMin(vdot * 1.05)),
+    easy:       speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.62)),  // ~62% (conservative easy)
+    marathon:   speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.78)),  // ~78% (sustainable MP)
+    threshold:  speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.84)),  // ~84% (practical tempo)
+    interval:   speedToPaceStr(vo2ToSpeedMperMin(vdot * 0.95)),  // ~95% (sustainable I-pace)
+    repetition: speedToPaceStr(vo2ToSpeedMperMin(vdot * 1.02)),  // ~102% (controlled R-pace)
   };
 };
 
