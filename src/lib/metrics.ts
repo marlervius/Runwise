@@ -37,10 +37,37 @@ export const filterValidRuns = (activities: StravaActivity[]): StravaActivity[] 
   });
 };
 
-// Classify activity type based on avg HR % of maxHR (fallback when zone data unavailable)
+// Classify activity type using multiple signals:
+// 1. Strava's workout_type tag (if manually set by user)
+// 2. Lap structure — interval workouts have high pace variance between laps
+// 3. Average HR % of maxHR — fallback when no structural data
 export const classifyActivityType = (activity: StravaActivity, maxHR: number): string => {
   if (activity.workout_type === 1) return "Race";
   if (activity.workout_type === 3) return "Workout";
+
+  // Check lap structure: structured workouts have alternating fast/slow laps
+  // This catches threshold and interval sessions that Strava doesn't tag
+  if (activity.laps && activity.laps.length >= 3) {
+    const validLaps = activity.laps.filter(lap => lap.distance > 100 && lap.average_speed > 0);
+    if (validLaps.length >= 3) {
+      const speeds = validLaps.map(lap => lap.average_speed);
+      const avgSpeed = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+      const variance = speeds.reduce((sum, s) => sum + Math.pow(s - avgSpeed, 2), 0) / speeds.length;
+      const cv = Math.sqrt(variance) / avgSpeed; // coefficient of variation
+
+      // CV > 0.08 indicates significant pace variation → structured workout
+      if (cv > 0.08) {
+        // Check if hard laps reach threshold HR levels
+        const maxLapHR = Math.max(...validLaps.filter(l => l.average_heartrate).map(l => l.average_heartrate!));
+        if (maxHR > 0 && maxLapHR > 0) {
+          const hardestPct = (maxLapHR / maxHR) * 100;
+          if (hardestPct >= 90) return "Threshold / Intervals";
+          if (hardestPct >= 82) return "Tempo / Intervals";
+        }
+        return "Workout";
+      }
+    }
+  }
 
   if (!activity.average_heartrate || !maxHR || maxHR === 0) {
     return "Easy";
@@ -503,7 +530,11 @@ const collectSpeedHRData = (
   maxHR: number
 ): SpeedHRDataPoint[] => {
   const dataPoints: SpeedHRDataPoint[] = [];
-  const minHR = maxHR * 0.65; // Only include segments where HR is meaningfully elevated
+  // Only include segments at moderate-to-hard intensity (>= 76% maxHR).
+  // Easy/recovery segments (< 76% maxHR) produce unreliable VDOT estimates
+  // because the HR-pace relationship is weakest at low intensity, and they
+  // drag the regression line down causing unstable day-to-day estimates.
+  const minHR = maxHR * 0.76;
 
   activities.forEach(activity => {
     const isTreadmill = activity.trainer === true;
