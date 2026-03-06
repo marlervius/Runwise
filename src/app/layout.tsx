@@ -14,8 +14,8 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "RunPrompt - AI-Powered Running Analysis",
-  description: "Connect your Strava account and get AI-powered insights for your runs",
+  title: "Runwise - Din personlige løpetrener",
+  description: "En AI-drevet løpetrener som tilpasser seg deg. Koble til Strava og få din daglige treningsplan.",
 };
 
 export default function RootLayout({
@@ -24,7 +24,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="no">
       <body
         className={`${sora.variable} ${jetbrainsMono.variable} font-sans antialiased`}
       >

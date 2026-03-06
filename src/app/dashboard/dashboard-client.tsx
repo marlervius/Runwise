@@ -484,7 +484,18 @@ export default function DashboardClient({
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-6 md:p-12">
       <div className="max-w-4xl mx-auto space-y-8">
-        
+
+        {/* Nerd Mode Banner */}
+        <div className="flex items-center gap-3 mb-2">
+          <a href="/today" className="text-slate-400 hover:text-white text-sm flex items-center gap-1">
+            <ChevronLeft className="w-4 h-4" />
+            Tilbake
+          </a>
+          <span className="text-xs bg-purple-500/20 text-purple-300 px-2 py-1 rounded-full font-medium">
+            Nerd Mode
+          </span>
+        </div>
+
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="space-y-2">

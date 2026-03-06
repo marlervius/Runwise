@@ -53,7 +53,7 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   callbacks: {
-    async jwt({ token, account }) {
+    async jwt({ token, account, profile }) {
       // Initial sign in - save tokens
       if (account) {
         console.log("[Auth] Initial sign in, saving tokens");
@@ -62,6 +62,7 @@ export const authOptions: NextAuthOptions = {
           accessToken: account.access_token,
           refreshToken: account.refresh_token,
           expiresAt: account.expires_at,
+          stravaId: (profile as any)?.id || Number(account.providerAccountId),
         };
       }
 
@@ -77,6 +78,7 @@ export const authOptions: NextAuthOptions = {
     },
     async session({ session, token }) {
       session.accessToken = token.accessToken as string;
+      session.stravaId = token.stravaId as number | undefined;
       session.error = token.error as string | undefined;
       return session;
     },
