@@ -5,7 +5,6 @@ import {
   classifyActivityType, 
   classifyByZones, 
   detectRunningType, 
-  calculateTrainingLoad, 
   calculateWeeklyVolumes, 
   calculateConsistencyMetrics,
   getWorkoutStructure,
@@ -17,6 +16,7 @@ import {
   estimateVDOTFromTempo,
   getDanielsTrainingPaces
 } from "./metrics";
+import { StravaSplitMetric } from "@/types/strava";
 import { WeatherData } from "./weather";
 
 // Zone colors and RPE labels
@@ -350,11 +350,11 @@ const formatLaps = (laps: StravaLap[], sessionAvgSpeed: number, isTreadmill: boo
   return text;
 };
 
-const formatSplits = (splits: any[]): string => {
+const formatSplits = (splits: StravaSplitMetric[]): string => {
   if (!splits || splits.length === 0) return "";
   
   let text = "\n[KM SPLITS (Auto)]\n";
-  splits.forEach((split: any, index: number) => {
+  splits.forEach((split: StravaSplitMetric, index: number) => {
     if (split.distance < 100) return;
     const splitPace = formatPace(split.average_speed);
     const splitHr = split.average_heartrate ? `HR: ${Math.round(split.average_heartrate)}` : "";
@@ -421,7 +421,7 @@ const calculateWorkLapHRDrift = (laps: StravaLap[], sessionAvgSpeed: number, isT
   return text;
 };
 
-const formatWeeklyVolumesTable = (volumes: any[]): string => {
+const formatWeeklyVolumesTable = (volumes: ReturnType<typeof calculateWeeklyVolumes>): string => {
   if (volumes.length === 0) return "Not enough data for weekly breakdown.";
   
   let table = "| Week | Km | Hours | Sessions | Elev (m) |\n";
@@ -462,7 +462,7 @@ const formatWeeklyVolumesTable = (volumes: any[]): string => {
   return table;
 };
 
-const formatConsistencyMetrics = (metrics: any): string => {
+const formatConsistencyMetrics = (metrics: ReturnType<typeof calculateConsistencyMetrics>): string => {
   if (metrics.totalActivities === 0) return "Not enough data.";
   
   let text = "";
@@ -482,7 +482,7 @@ const formatConsistencyMetrics = (metrics: any): string => {
   return text;
 };
 
-const findSimilarWorkout = (current: StravaActivity, history: StravaActivity[], maxHR: number): string => {
+const findSimilarWorkout = (current: StravaActivity, history: StravaActivity[]): string => {
   if (history.length === 0) return "";
   
   const currentDist = current.distance / 1000;
@@ -661,7 +661,7 @@ export const generateSessionData = (
   const zonesText = formatZonesForPrompt(zones);
   
   const keyPRs = getKeyPRs(bestEfforts);
-  let prsText = keyPRs.length > 0
+  const prsText = keyPRs.length > 0
     ? keyPRs.map(pr => `- ${pr.name}: ${pr.time}${pr.isPR ? ' 🏆 PR!' : ''}`).join('\n')
     : "None this session";
 
@@ -670,7 +670,7 @@ export const generateSessionData = (
   const weeklyTable = formatWeeklyVolumesTable(weeklyVolumes);
   const consistency = calculateConsistencyMetrics(allActivities);
   const consistencyText = formatConsistencyMetrics(consistency);
-  const comparisonText = findSimilarWorkout(currentRun, history, maxHR);
+  const comparisonText = findSimilarWorkout(currentRun, history);
   const historyTable = generateHistoryTable(history, maxHR);
   
   const acwr = calculateACWR(allActivities);

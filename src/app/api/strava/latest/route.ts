@@ -1,21 +1,14 @@
-import { getServerSession } from "next-auth";
 import { NextResponse } from "next/server";
-import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 import { getLatestActivity, formatActivity } from "@/lib/strava";
 import { generateRunPrompt } from "@/lib/promptUtils";
+import { handleRouteError } from "@/lib/server/api";
+import { requireRunwiseSession } from "@/lib/server/auth";
 
 export async function GET() {
   try {
-    const session = await getServerSession(authOptions);
+    const session = await requireRunwiseSession({ requireAccessToken: true });
 
-    if (!session?.accessToken) {
-      return NextResponse.json(
-        { error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
-
-    const activity = await getLatestActivity(session.accessToken);
+    const activity = await getLatestActivity(session.accessToken!);
 
     if (!activity) {
       return NextResponse.json(
@@ -33,10 +26,6 @@ export async function GET() {
       prompt,
     });
   } catch (error) {
-    console.error("Error in /api/strava/latest:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    return handleRouteError(error, "Error in /api/strava/latest");
   }
 }

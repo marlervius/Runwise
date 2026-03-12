@@ -56,8 +56,9 @@ export async function saveDailyWorkout(
 }
 
 export async function updateMoodAndAdjustment(
+  userId: string,
   workoutId: string,
-  mood: string,
+  mood: DailyWorkout["moodInput"],
   adjustedWorkout: WeeklyPlanDay
 ): Promise<DailyWorkout> {
   const { data, error } = await getSupabaseAdmin()
@@ -66,6 +67,7 @@ export async function updateMoodAndAdjustment(
       mood_input: mood,
       mood_adjusted_json: adjustedWorkout,
     })
+    .eq("user_id", userId)
     .eq("id", workoutId)
     .select("*")
     .single();
@@ -75,8 +77,9 @@ export async function updateMoodAndAdjustment(
 }
 
 export async function savePostWorkoutFeedback(
+  userId: string,
   workoutId: string,
-  effort: string,
+  effort: DailyWorkout["feedbackEffort"],
   note?: string
 ): Promise<void> {
   const { error } = await getSupabaseAdmin()
@@ -85,6 +88,7 @@ export async function savePostWorkoutFeedback(
       feedback_effort: effort,
       feedback_note: note || null,
     })
+    .eq("user_id", userId)
     .eq("id", workoutId);
 
   if (error) throw new Error(`Failed to save feedback: ${error.message}`);

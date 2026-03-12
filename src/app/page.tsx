@@ -8,7 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Activity, CalendarDays, Brain, ArrowRight } from "lucide-react";
 
 export default function LandingPage() {
-  const { data: session, status } = useSession();
+  const { status } = useSession();
   const router = useRouter();
 
   useEffect(() => {

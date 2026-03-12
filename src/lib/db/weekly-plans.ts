@@ -11,6 +11,7 @@ function mapRow(row: Record<string, unknown>): WeeklyPlan {
     totalVolumeKm: (planJson.totalVolumeKm as number) || 0,
     hardDayCount: (planJson.hardDayCount as number) || 0,
     rationale: (planJson.rationale as string) || "",
+    weekFocus: (planJson.weekFocus as string) || undefined,
     createdAt: row.created_at as string,
   };
 }
@@ -18,22 +19,31 @@ function mapRow(row: Record<string, unknown>): WeeklyPlan {
 export async function getCurrentWeekPlan(
   userId: string
 ): Promise<WeeklyPlan | null> {
-  // Get current Monday
-  const now = new Date();
-  const day = now.getDay();
-  const diff = now.getDate() - day + (day === 0 ? -6 : 1);
-  const monday = new Date(now.setDate(diff));
-  monday.setHours(0, 0, 0, 0);
-  const weekStart = monday.toISOString().split("T")[0];
+  const today = new Date().toISOString().split("T")[0];
 
+  // Find the most recent plan whose start date is <= today
+  // and that still covers today (14-day plans: start + 13 days)
   const { data } = await getSupabaseAdmin()
     .from("weekly_plans")
     .select("*")
     .eq("user_id", userId)
-    .eq("week_start", weekStart)
+    .lte("week_start", today)
+    .order("week_start", { ascending: false })
+    .limit(1)
     .single();
 
-  return data ? mapRow(data) : null;
+  if (!data) return null;
+
+  const plan = mapRow(data);
+
+  // Check if today falls within the plan's date range
+  const lastDay = plan.days[plan.days.length - 1];
+  if (lastDay && lastDay.date < today) {
+    // Plan has expired — all days are in the past
+    return null;
+  }
+
+  return plan;
 }
 
 export async function saveWeeklyPlan(
@@ -44,6 +54,7 @@ export async function saveWeeklyPlan(
     totalVolumeKm: number;
     hardDayCount: number;
     rationale: string;
+    weekFocus?: string;
   }
 ): Promise<WeeklyPlan> {
   const { data, error } = await getSupabaseAdmin()

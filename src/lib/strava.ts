@@ -1,6 +1,6 @@
-import { StravaActivity, FormattedActivity } from "@/types";
-
-const STRAVA_API_BASE = "https://www.strava.com/api/v3";
+import { FormattedActivity } from "@/types";
+import { StravaActivity } from "@/types/strava";
+import { getAthleteActivities, getDetailedActivity } from "@/lib/server/strava";
 
 /**
  * Fetches the latest activity with full details (including splits)
@@ -9,42 +9,13 @@ export async function getLatestActivity(
   accessToken: string
 ): Promise<StravaActivity | null> {
   try {
-    // First, get the list of activities to find the latest one
-    const listResponse = await fetch(
-      `${STRAVA_API_BASE}/athlete/activities?page=1&per_page=1`,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
-
-    if (!listResponse.ok) {
-      throw new Error(`Strava API error: ${listResponse.status}`);
-    }
-
-    const activities: StravaActivity[] = await listResponse.json();
+    const activities = await getAthleteActivities(accessToken, { page: 1, perPage: 1 });
     
     if (activities.length === 0) {
       return null;
     }
 
-    // Fetch detailed activity data (includes splits)
-    const detailResponse = await fetch(
-      `${STRAVA_API_BASE}/activities/${activities[0].id}`,
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
-
-    if (!detailResponse.ok) {
-      throw new Error(`Strava API error: ${detailResponse.status}`);
-    }
-
-    const detailedActivity: StravaActivity = await detailResponse.json();
-    return detailedActivity;
+    return await getDetailedActivity(accessToken, activities[0].id);
   } catch (error) {
     console.error("Error fetching latest activity:", error);
     return null;
@@ -86,7 +57,7 @@ export function formatActivity(activity: StravaActivity): FormattedActivity {
     distance: `${distanceKm.toFixed(2)} km`,
     pace: `${paceMinutes}:${paceSeconds.toString().padStart(2, "0")} /km`,
     duration: durationParts.join(" "),
-    type: activity.sport_type || activity.type,
+    type: activity.sport_type || activity.type || "Run",
     elevationGain: `${Math.round(activity.total_elevation_gain)} m`,
     averageHeartrate: activity.average_heartrate
       ? `${Math.round(activity.average_heartrate)} bpm`

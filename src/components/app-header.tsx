@@ -3,7 +3,7 @@
 import { signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Activity, BarChart3, Settings, LogOut } from "lucide-react";
+import { Activity, BarChart3, Gauge, Settings, LogOut } from "lucide-react";
 
 interface AppHeaderProps {
   showNerdMode?: boolean;
@@ -25,6 +25,15 @@ export function AppHeader({ showNerdMode = true, onSettingsClick }: AppHeaderPro
       </div>
 
       <div className="flex items-center gap-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => router.push("/vdot")}
+          className="text-slate-400 hover:text-white hover:bg-slate-800"
+          title="VDOT Kalkulator"
+        >
+          <Gauge className="w-5 h-5" />
+        </Button>
         {showNerdMode && (
           <Button
             variant="ghost"

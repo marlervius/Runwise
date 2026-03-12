@@ -1,9 +1,24 @@
 import NextAuth, { NextAuthOptions } from "next-auth";
+import { JWT } from "next-auth/jwt";
 import StravaProvider from "next-auth/providers/strava";
 
-async function refreshAccessToken(token: any) {
+type StravaProfile = {
+  id?: number | string;
+};
+
+type RefreshedStravaTokenResponse = {
+  access_token?: string;
+  expires_at?: number;
+  refresh_token?: string;
+};
+
+async function refreshAccessToken(token: JWT): Promise<JWT> {
   try {
     console.log("[Auth] Refreshing access token...");
+
+    if (typeof token.refreshToken !== "string" || token.refreshToken.length === 0) {
+      throw new Error("Missing refresh token");
+    }
     
     const response = await fetch("https://www.strava.com/oauth/token", {
       method: "POST",
@@ -16,7 +31,7 @@ async function refreshAccessToken(token: any) {
       }),
     });
 
-    const refreshedTokens = await response.json();
+    const refreshedTokens = (await response.json()) as RefreshedStravaTokenResponse;
 
     if (!response.ok) {
       console.error("[Auth] Failed to refresh token:", refreshedTokens);
@@ -57,12 +72,16 @@ export const authOptions: NextAuthOptions = {
       // Initial sign in - save tokens
       if (account) {
         console.log("[Auth] Initial sign in, saving tokens");
+        const profileId = (profile as StravaProfile | undefined)?.id;
         return {
           ...token,
           accessToken: account.access_token,
           refreshToken: account.refresh_token,
           expiresAt: account.expires_at,
-          stravaId: (profile as any)?.id || Number(account.providerAccountId),
+          stravaId:
+            typeof profileId === "number"
+              ? profileId
+              : Number(profileId ?? account.providerAccountId),
         };
       }
 

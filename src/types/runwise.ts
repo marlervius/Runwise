@@ -1,5 +1,10 @@
 // Runwise-specific types
 
+export interface HRZone {
+  min: number;
+  max: number;
+}
+
 export interface RunwiseUserProfile {
   id: string;
   stravaId: number;
@@ -7,6 +12,8 @@ export interface RunwiseUserProfile {
   maxHR: number;
   restingHR: number;
   lactateThreshold: string;
+  /** User's custom HR zone boundaries [Z1, Z2, Z3, Z4, Z5]. Overrides calculated zones when set. */
+  customHrZones?: HRZone[] | null;
   goal: string;
   nextRaceDate: string | null;
   nextRaceDistance: string | null;
@@ -17,6 +24,15 @@ export interface RunwiseUserProfile {
   onboardingCompleted: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Én fase i øktstrukturen (oppvarming, hoveddel, nedkjøling, drag osv.) */
+export interface WorkoutPhase {
+  phase: string;       // "Oppvarming", "5 × 4 min hardt", "Nedkjøling" osv.
+  duration: string;    // "10 min", "4 × 4 min" osv.
+  pace?: string;       // "5:00–5:30/km"
+  hrZone?: string;     // "Z4–Z5"
+  note?: string;       // "3 min rolig mellom hvert drag"
 }
 
 export interface WeeklyPlanDay {
@@ -35,7 +51,8 @@ export interface WeeklyPlanDay {
   intensityZone: string;
   hrZone?: string;
   paceZone?: string;
-  description: string; // 1-2 sentences in Norwegian
+  description: string; // 1-2 sentences in Norwegian, warm and personal
+  structure?: WorkoutPhase[]; // Detailed phase breakdown for WorkoutDetail modal
   treadmillVariant?: string;
   isHardDay: boolean;
 }
@@ -48,6 +65,26 @@ export interface WeeklyPlan {
   totalVolumeKm: number;
   hardDayCount: number;
   rationale: string;
+  weekFocus?: string; // Short human-readable weekly summary shown in UI
+  createdAt: string;
+}
+
+export type WorkoutReviewRating = "excellent" | "good" | "ok" | "hard" | "missed";
+
+export interface WorkoutReview {
+  id: string;
+  userId: string;
+  stravaActivityId: number;
+  rating: WorkoutReviewRating;
+  headline: string;
+  body: string;
+  keyObservation?: string;
+  nextImplication?: string;
+  actualVsPlanned?: {
+    distanceDiffKm: number;
+    paceDiffSec: number;
+    withinPlan: boolean;
+  };
   createdAt: string;
 }
 

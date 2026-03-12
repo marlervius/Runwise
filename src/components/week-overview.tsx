@@ -1,8 +1,17 @@
 "use client";
 
 import { WeeklyPlanDay } from "@/types/runwise";
+import { Check } from "lucide-react";
 
-const DAY_LABELS = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
+const DAY_LABELS_SHORT: Record<number, string> = {
+  1: "Man",
+  2: "Tir",
+  3: "Ons",
+  4: "Tor",
+  5: "Fre",
+  6: "Lør",
+  7: "Søn",
+};
 
 const TYPE_COLORS: Record<string, string> = {
   easy: "bg-blue-500",
@@ -22,55 +31,127 @@ const TYPE_ABBREVS: Record<string, string> = {
   rest: "H",
 };
 
-interface WeekOverviewProps {
-  days: WeeklyPlanDay[];
-  today: string; // ISO date
+interface DayButtonProps {
+  day: WeeklyPlanDay;
+  today: string;
+  selectedDate?: string;
+  completedDates?: Set<string>;
   onDayClick?: (day: WeeklyPlanDay) => void;
 }
 
-export function WeekOverview({ days, today, onDayClick }: WeekOverviewProps) {
-  return (
-    <div className="bg-slate-800/40 rounded-xl p-4 border border-slate-700/50">
-      <h3 className="text-xs text-slate-500 uppercase tracking-wider mb-3 font-medium">
-        Ukeoversikt
-      </h3>
-      <div className="grid grid-cols-7 gap-2">
-        {days.map((day, i) => {
-          const isToday = day.date === today;
-          const color = TYPE_COLORS[day.workoutType] || TYPE_COLORS.rest;
-          const abbrev = TYPE_ABBREVS[day.workoutType] || "?";
+function DayButton({ day, today, selectedDate, completedDates, onDayClick }: DayButtonProps) {
+  const isToday = day.date === today;
+  const isPast = day.date < today;
+  const isSelected = day.date === selectedDate;
+  const isCompleted = completedDates?.has(day.date);
+  const color = TYPE_COLORS[day.workoutType] || TYPE_COLORS.rest;
+  const abbrev = TYPE_ABBREVS[day.workoutType] || "?";
+  const dayLabel = DAY_LABELS_SHORT[day.dayOfWeek] ?? day.date.split("-")[2];
 
-          return (
-            <button
-              key={day.date}
-              onClick={() => onDayClick?.(day)}
-              className={`flex flex-col items-center gap-1.5 py-2 rounded-lg transition-all ${
-                isToday
-                  ? "ring-2 ring-orange-500 bg-slate-700/50"
-                  : "hover:bg-slate-700/30"
-              }`}
-            >
-              <span className="text-[10px] text-slate-500 font-medium">
-                {DAY_LABELS[i]}
-              </span>
-              <div
-                className={`w-8 h-8 rounded-lg ${color} flex items-center justify-center ${
-                  day.isHardDay ? "ring-1 ring-white/30" : ""
-                }`}
-              >
-                <span className="text-white text-xs font-bold">{abbrev}</span>
-              </div>
-              {day.workoutType !== "rest" && (
-                <span className="text-[10px] text-slate-500">
-                  {day.estimatedDistanceKm > 0
-                    ? `${day.estimatedDistanceKm.toFixed(0)}km`
-                    : ""}
-                </span>
-              )}
-            </button>
-          );
-        })}
+  return (
+    <button
+      type="button"
+      onClick={() => onDayClick?.(day)}
+      className={[
+        "flex flex-col items-center gap-1 py-1.5 rounded-lg transition-all",
+        isToday
+          ? "ring-2 ring-orange-500 bg-slate-700/50"
+          : isSelected
+            ? "ring-2 ring-white/60 bg-slate-700/60"
+            : isPast
+              ? "opacity-60 hover:opacity-90 hover:bg-slate-700/20"
+              : "hover:bg-slate-700/30",
+      ].join(" ")}
+    >
+      <span className="text-[10px] text-slate-500 font-medium">{dayLabel}</span>
+      <div
+        className={`w-8 h-8 rounded-lg ${color} flex items-center justify-center ${
+          day.isHardDay ? "ring-1 ring-white/30" : ""
+        }`}
+      >
+        {isCompleted ? (
+          <Check className="w-4 h-4 text-white" />
+        ) : (
+          <span className="text-white text-xs font-bold">{abbrev}</span>
+        )}
       </div>
+      <span className="text-[9px] text-slate-500">{day.date.split("-")[2]}</span>
+    </button>
+  );
+}
+
+interface WeekRowProps {
+  label: string;
+  days: WeeklyPlanDay[];
+  today: string;
+  selectedDate?: string;
+  completedDates?: Set<string>;
+  onDayClick?: (day: WeeklyPlanDay) => void;
+}
+
+function WeekRow({ label, days, today, selectedDate, completedDates, onDayClick }: WeekRowProps) {
+  return (
+    <div>
+      <p className="text-[10px] text-slate-600 uppercase tracking-wider mb-2 font-medium">
+        {label}
+      </p>
+      <div className="grid grid-cols-7 gap-1.5">
+        {days.map((day) => (
+          <DayButton
+            key={day.date}
+            day={day}
+            today={today}
+            selectedDate={selectedDate}
+            completedDates={completedDates}
+            onDayClick={onDayClick}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface WeekOverviewProps {
+  days: WeeklyPlanDay[];
+  today: string;
+  completedDates?: Set<string>;
+  selectedDate?: string;
+  onDayClick?: (day: WeeklyPlanDay) => void;
+}
+
+export function WeekOverview({
+  days,
+  today,
+  completedDates,
+  selectedDate,
+  onDayClick,
+}: WeekOverviewProps) {
+  const week1 = days.slice(0, 7);
+  const week2 = days.slice(7, 14);
+
+  return (
+    <div className="bg-slate-800/40 rounded-xl p-4 border border-slate-700/50 space-y-3">
+      <h3 className="text-xs text-slate-500 uppercase tracking-wider font-medium">
+        14-dagers plan
+      </h3>
+      <WeekRow
+        label="Uke 1"
+        days={week1}
+        today={today}
+        selectedDate={selectedDate}
+        completedDates={completedDates}
+        onDayClick={onDayClick}
+      />
+      {week2.length > 0 && (
+        <WeekRow
+          label="Uke 2"
+          days={week2}
+          today={today}
+          selectedDate={selectedDate}
+          completedDates={completedDates}
+          onDayClick={onDayClick}
+        />
+      )}
     </div>
   );
 }

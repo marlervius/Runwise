@@ -1,21 +1,16 @@
-import { getServerSession } from "next-auth";
 import { NextResponse } from "next/server";
-import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 import { generateWeeklyPlan } from "@/lib/ai/plan-service";
+import { handleRouteError } from "@/lib/server/api";
+import { requireRunwiseSession } from "@/lib/server/auth";
 
 export async function POST() {
-  const session = await getServerSession(authOptions);
-
-  if (!session?.accessToken || !session?.stravaId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   try {
-    const plan = await generateWeeklyPlan(session.stravaId, session.accessToken);
+    const session = await requireRunwiseSession({ requireAccessToken: true });
+    console.log("[AI] Starting plan generation for stravaId:", session.stravaId);
+    const plan = await generateWeeklyPlan(session.stravaId, session.accessToken!);
+    console.log("[AI] Plan generated successfully, days:", plan.days?.length);
     return NextResponse.json(plan);
-  } catch (error: unknown) {
-    console.error("[AI] Failed to generate plan:", error);
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+  } catch (error) {
+    return handleRouteError(error, "[AI] Failed to generate plan");
   }
 }

@@ -1,5 +1,5 @@
 import { getSupabaseAdmin } from "@/lib/supabase";
-import { RunwiseUserProfile } from "@/types/runwise";
+import { RunwiseUserProfile, HRZone } from "@/types/runwise";
 
 function mapRow(row: Record<string, unknown>): RunwiseUserProfile {
   return {
@@ -17,6 +17,7 @@ function mapRow(row: Record<string, unknown>): RunwiseUserProfile {
     injuryHistory: (row.injury_history as string) || "",
     aiPersonality: (row.ai_personality as string) || "Supportive Coach",
     onboardingCompleted: row.onboarding_completed as boolean,
+    customHrZones: (row.custom_hr_zones as HRZone[] | null) ?? null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -64,6 +65,7 @@ export async function updateProfile(
     aiPersonality: string;
     onboardingCompleted: boolean;
     stravaAthleteJson: Record<string, unknown>;
+    customHrZones: HRZone[] | null;
   }>
 ): Promise<RunwiseUserProfile> {
   const dbUpdates: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -80,6 +82,7 @@ export async function updateProfile(
   if (updates.aiPersonality !== undefined) dbUpdates.ai_personality = updates.aiPersonality;
   if (updates.onboardingCompleted !== undefined) dbUpdates.onboarding_completed = updates.onboardingCompleted;
   if (updates.stravaAthleteJson !== undefined) dbUpdates.strava_athlete_json = updates.stravaAthleteJson;
+  if (updates.customHrZones !== undefined) dbUpdates.custom_hr_zones = updates.customHrZones;
 
   const { data, error } = await getSupabaseAdmin()
     .from("user_profiles")

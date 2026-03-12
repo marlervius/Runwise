@@ -4,11 +4,11 @@ import { useState, useEffect, useMemo, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Activity, Calendar, Clock, MapPin, Copy, Check, Timer, TrendingUp, BarChart3, Heart, Trophy, Zap, Sparkles, RefreshCw, Info, Gauge, History, ChevronLeft, ChevronRight } from "lucide-react";
-import { 
-  SettingsDialog, 
-  UserProfile, 
-  DEFAULT_PROFILE, 
+import { Activity, Calendar, Clock, MapPin, Copy, Check, Timer, TrendingUp, BarChart3, Heart, Trophy, Zap, Sparkles, RefreshCw, Info, Gauge, History, ChevronLeft } from "lucide-react";
+import {
+  LegacySettingsDialog as SettingsDialog,
+  UserProfile,
+  DEFAULT_PROFILE,
   loadProfileFromStorage,
   hasStoredProfile
 } from "@/components/settings-dialog";
@@ -25,12 +25,11 @@ import {
   Legend,
 } from "recharts";
 
-import { 
-  StravaActivity, 
-  HeartRateZoneBucket, 
-  BestEffort, 
-  AthleteStats, 
-  ChartDataPoint 
+import {
+  StravaActivity,
+  HeartRateZoneBucket,
+  BestEffort,
+  ChartDataPoint,
 } from "@/types/strava";
 
 import { 
@@ -54,7 +53,6 @@ import { getHistoricalWeather, WeatherData } from "@/lib/weather";
 
 interface DashboardClientProps {
   activities: StravaActivity[];
-  athleteStats: AthleteStats | null;
   bestEfforts: BestEffort[];
   heartRateZones: HeartRateZoneBucket[];
 }
@@ -75,7 +73,12 @@ const prepareChartData = (activities: StravaActivity[]): ChartDataPoint[] => {
 };
 
 // Custom Tooltip for the chart
-const CustomTooltip = ({ active, payload }: any) => {
+type CustomTooltipProps = {
+  active?: boolean;
+  payload?: Array<{ payload: ChartDataPoint }>;
+};
+
+const CustomTooltip = ({ active, payload }: CustomTooltipProps) => {
   if (active && payload && payload.length) {
     const data = payload[0].payload;
     return (
@@ -100,7 +103,6 @@ type PromptMode = 'setup' | 'daily';
 
 export default function DashboardClient({ 
   activities, 
-  athleteStats,
   bestEfforts: initialBestEfforts,
   heartRateZones: initialHeartRateZones 
 }: DashboardClientProps) {
@@ -175,7 +177,7 @@ export default function DashboardClient({
   }, [bestEffortsMap]);
 
   // Fetch detailed data for selected activity if not already enriched
-  const fetchActivityDetail = useCallback(async (activity: StravaActivity, activityIndex: number) => {
+  const fetchActivityDetail = useCallback(async (activity: StravaActivity) => {
     // Check local cache first
     const cachedData = getCachedActivityDetail(activity.id);
     const hasDetailedData = activity.splits_metric && activity.splits_metric.length > 0;
@@ -276,7 +278,7 @@ export default function DashboardClient({
   const currentRunId = currentRun?.id;
   useEffect(() => {
     if (currentRun && currentRunId) {
-      fetchActivityDetail(currentRun, selectedActivityIndex);
+      fetchActivityDetail(currentRun);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedActivityIndex, currentRunId]);
@@ -307,7 +309,7 @@ export default function DashboardClient({
       try {
         const res = await fetch(`/api/strava/best-efforts?ids=${stillMissing.join(',')}`);
         if (res.ok) {
-          const data: Record<string, any[]> = await res.json();
+          const data: Record<string, BestEffort[]> = await res.json();
           setBestEffortsMap(prev => {
             const updated = new Map(prev);
             Object.entries(data).forEach(([id, efforts]) => {

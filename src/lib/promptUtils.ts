@@ -1,3 +1,5 @@
+import { StravaSplitMetric } from "@/types/strava";
+
 interface StravaActivity {
   name: string;
   start_date_local: string;
@@ -11,7 +13,7 @@ interface StravaActivity {
   average_cadence?: number; 
   suffer_score?: number;
   description?: string;
-  splits_metric?: any[]; 
+  splits_metric?: StravaSplitMetric[];
 }
 
 // HARDCODED PROFILE (MVP Version) - We will make this editable later
@@ -56,7 +58,7 @@ export const generateRunPrompt = (activity: StravaActivity): string => {
   let splitsText = "";
   if (activity.splits_metric && activity.splits_metric.length > 0) {
     splitsText = "\n[KM SPLITS]\n";
-    activity.splits_metric.forEach((split: any, index: number) => {
+    activity.splits_metric.forEach((split: StravaSplitMetric, index: number) => {
       if (split.distance < 100) return; 
       const splitPace = formatPace(split.average_speed);
       const splitHr = split.average_heartrate ? `HR: ${Math.round(split.average_heartrate)}` : "";

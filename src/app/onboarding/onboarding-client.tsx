@@ -10,7 +10,6 @@ import {
   CheckCircle,
   ArrowRight,
   Loader2,
-  Activity,
   Calendar,
   Footprints,
   Dumbbell,

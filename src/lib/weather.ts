@@ -1,10 +1,19 @@
 export interface WeatherData {
   temperature: number; // Celsius
   humidity: number; // %
+  dewpoint: number; // Celsius
   windSpeed: number; // m/s
   windDirection: number; // degrees
   weatherCode: number;
   condition: string;
+}
+
+// Magnus formula fallback: calculate dewpoint from temperature and humidity
+export function calculateDewpoint(tempC: number, humidityPct: number): number {
+  const a = 17.27;
+  const b = 237.7;
+  const alpha = (a * tempC) / (b + tempC) + Math.log(humidityPct / 100);
+  return (b * alpha) / (a - alpha);
 }
 
 // Map WMO weather codes to human readable conditions
@@ -38,7 +47,7 @@ export const getHistoricalWeather = async (
 
     // Call the Historical API (if older than a week) or Forecast API (if recent)
     // Open-Meteo's unified API endpoint
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,weather_code&start_date=${dateStr}&end_date=${dateStr}`;
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&hourly=temperature_2m,relative_humidity_2m,dewpoint_2m,wind_speed_10m,wind_direction_10m,weather_code&start_date=${dateStr}&end_date=${dateStr}`;
 
     const res = await fetch(url, { cache: 'force-cache' });
     if (!res.ok) return null;
@@ -52,7 +61,11 @@ export const getHistoricalWeather = async (
 
     const temp = data.hourly.temperature_2m[hourIndex];
     const humidity = data.hourly.relative_humidity_2m[hourIndex];
-    // Convert km/h to m/s for wind speed (Strava users prefer m/s or km/h, let's keep m/s for consistency)
+    // Dewpoint: prefer API value, fallback to Magnus formula
+    const dewpointRaw = data.hourly.dewpoint_2m?.[hourIndex];
+    const dewpoint =
+      dewpointRaw != null ? dewpointRaw : calculateDewpoint(temp, humidity);
+    // Convert km/h to m/s for wind speed
     const windSpeedKmH = data.hourly.wind_speed_10m[hourIndex];
     const windSpeedMs = windSpeedKmH / 3.6;
     const windDir = data.hourly.wind_direction_10m[hourIndex];
@@ -61,6 +74,7 @@ export const getHistoricalWeather = async (
     return {
       temperature: temp,
       humidity: humidity,
+      dewpoint: dewpoint,
       windSpeed: windSpeedMs,
       windDirection: windDir,
       weatherCode: code,

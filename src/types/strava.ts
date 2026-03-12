@@ -13,6 +13,14 @@ export interface StravaLap {
   split?: number; // index
 }
 
+export interface StravaSplitMetric {
+  distance: number;
+  elapsed_time: number;
+  average_speed: number;
+  average_heartrate?: number;
+  elevation_difference?: number;
+}
+
 export interface StravaGear {
   id: string;
   name: string;
@@ -33,8 +41,9 @@ export interface StravaActivity {
   max_heartrate?: number;
   average_cadence?: number;
   suffer_score?: number;
+  calories?: number;
   description?: string;
-  splits_metric?: any[];
+  splits_metric?: StravaSplitMetric[];
   type?: string;
   sport_type?: string;
   best_efforts?: BestEffort[];
